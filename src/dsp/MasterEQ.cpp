@@ -1,4 +1,4 @@
-#include "MasterEQ.h"
+#include "dsp/MasterEQ.h"
 
 namespace atmos {
 

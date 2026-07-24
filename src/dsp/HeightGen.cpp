@@ -1,4 +1,4 @@
-#include "HeightGen.h"
+#include "dsp/HeightGen.h"
 
 namespace atmos {
 

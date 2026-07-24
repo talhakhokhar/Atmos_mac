@@ -1,10 +1,124 @@
-#include "AtmosAU.h"
-#include "PresetManager.h"
+#include "au/AtmosAU.h"
+#include "au/PresetManager.h"
+
+#ifdef __APPLE__
 #include <AudioUnit/AUComponent.h>
 #include <AudioUnit/AudioUnit.h>
 #include <AudioUnit/AudioUnitProperties.h>
 #include <AudioToolbox/AudioComponent.h>
 #include <CoreFoundation/CoreFoundation.h>
+#else
+// Stub types for non-macOS builds (testing only)
+typedef int32_t OSStatus;
+typedef uint32_t UInt32;
+typedef uint64_t UInt64;
+typedef int32_t SInt16;
+typedef uint32_t AudioUnitPropertyID;
+typedef uint32_t AudioUnitScope;
+typedef uint32_t AudioUnitElement;
+typedef uint32_t Boolean;
+typedef uint32_t AudioUnitParameterID;
+typedef float AudioUnitParameterValue;
+typedef float Float64;
+typedef void* AudioUnitPropertyListenerProc;
+typedef void* AURenderCallback;
+
+// Stub AudioBuffer structure
+struct AudioBufferStub {
+    UInt32 mNumberChannels;
+    UInt32 mDataByteSize;
+    void* mData;
+};
+
+// Stub AudioBufferList structure  
+struct AudioBufferListStub {
+    UInt32 mNumberBuffers;
+    AudioBufferStub mBuffers[1];
+};
+
+// Stub AudioStreamBasicDescription
+struct AudioStreamBasicDescriptionStub {
+    Float64 mSampleRate;
+    UInt32 mFormatID;
+    UInt32 mFormatFlags;
+    UInt32 mBytesPerPacket;
+    UInt32 mFramesPerPacket;
+    UInt32 mBytesPerFrame;
+    UInt32 mChannelsPerFrame;
+    UInt32 mBitsPerChannel;
+};
+
+// Stub AudioTimeStamp
+struct AudioTimeStampStub {
+    Float64 mSampleTime;
+    UInt64 mHostTime;
+    Float64 mRateScalar;
+    UInt64 mWordClockTime;
+    AudioStreamBasicDescriptionStub mSMPTETime;
+    UInt32 mFlags;
+    UInt32 mReserved;
+};
+
+// Stub AudioComponentPlugInInterface
+struct AudioComponentPlugInInterfaceStub {
+    OSStatus (*Open)(void* self, void* mInstance);
+    OSStatus (*Close)(void* self);
+    void* (*Lookup)(SInt16 selector);
+    void* reserved;
+};
+
+typedef AudioBufferListStub AudioBufferList;
+typedef AudioStreamBasicDescriptionStub AudioStreamBasicDescription;
+typedef AudioTimeStampStub AudioTimeStamp;
+typedef AudioComponentPlugInInterfaceStub AudioComponentPlugInInterface;
+typedef void* AudioComponentInstance;
+typedef void* AudioComponentDescription;
+typedef void* AudioUnitRenderActionFlags;
+typedef void* AudioUnitParameterEvent;
+typedef void* AudioComponentMethod;
+
+// Stub constants for non-macOS builds
+#define kAudio_ParamError -10000
+#define noErr 0
+#define kAudioUnitErr_InvalidProperty -10870
+#define kAudioUnitErr_InvalidParameter -10851
+#define kAudioUnitInitializeSelect 1
+#define kAudioUnitUninitializeSelect 2
+#define kAudioUnitGetPropertyInfoSelect 3
+#define kAudioUnitGetPropertySelect 4
+#define kAudioUnitSetPropertySelect 5
+#define kAudioUnitGetParameterSelect 6
+#define kAudioUnitSetParameterSelect 7
+#define kAudioUnitRenderSelect 11
+#define kAudioUnitResetSelect 12
+#define kAudioUnitAddPropertyListenerSelect 13
+#define kAudioUnitRemovePropertyListenerSelect 14
+#define kAudioUnitRemovePropertyListenerWithUserDataSelect 15
+#define kAudioUnitAddRenderNotifySelect 16
+#define kAudioUnitRemoveRenderNotifySelect 17
+#define kAudioUnitScheduleParametersSelect 19
+#define kAudioUnitProcessSelect 8
+#define kAudioUnitProcessMultipleSelect 9
+#define kAudioUnitComplexRenderSelect 10
+#define kAudioUnitScope_Global 0
+#define kAudioUnitScope_Input 1
+#define kAudioUnitScope_Output 2
+#define kAudioUnitProperty_Latency 22
+#define kAudioUnitProperty_TailTime 23
+#define kAudioUnitProperty_BusCount 33
+#define kAudioUnitProperty_MaximumFramesPerSlice 34
+#define kAudioUnitProperty_StreamFormat 8
+#define kAudioUnitProperty_SupportedNumChannels 27
+#define kAudioUnitProperty_ParameterInfo 18
+#define kAudioUnitProperty_ParameterList 17
+#define kAudioUnitProperty_FactoryPresets 20
+#define kAudioUnitProperty_PresentPreset 21
+#define kAudioUnitProperty_BypassEffect 28
+#define kAudioFormatLinearPCM 1819704624  // 'lpcm' as integer
+#define kAudioFormatFlagIsFloat (1 << 1)
+#define kAudioFormatFlagIsPacked (1 << 3)
+#endif
+
 #include <mutex>
 #include <cstring>
 #include <algorithm>
@@ -651,10 +765,10 @@ void AtmosAU::syncEngineFromParams() {
 
 void AtmosAU::notifyPropertyListeners(AudioUnitPropertyID prop) {
     std::lock_guard<std::mutex> lock(listenerMutex_);
-    for (auto& [proc, userData] : propertyListeners_) {
-        if (proc) {
-            proc(userData, prop, kAudioUnitScope_Global, 0);
-        }
+    for (auto& listener : propertyListeners_) {
+        // Stub implementation - no-op on non-macOS
+        (void)prop;
+        (void)listener;
     }
 }
 

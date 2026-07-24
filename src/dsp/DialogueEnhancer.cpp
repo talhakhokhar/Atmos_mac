@@ -1,4 +1,4 @@
-#include "DialogueEnhancer.h"
+#include "dsp/DialogueEnhancer.h"
 
 namespace atmos {
 
