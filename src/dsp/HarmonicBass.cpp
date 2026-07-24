@@ -1,4 +1,4 @@
-#include "HarmonicBass.h"
+#include "dsp/HarmonicBass.h"
 
 namespace atmos {
 

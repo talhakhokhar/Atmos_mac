@@ -1,4 +1,4 @@
-#include "ParamSmooth.h"
+#include "dsp/ParamSmooth.h"
 
 namespace atmos {
 

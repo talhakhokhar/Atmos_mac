@@ -3,8 +3,28 @@
 #include "../dsp/SpatialEngine.h"
 #include "../au/ParameterDefs.h"
 #include "../au/PresetManager.h"
+
+#ifdef __APPLE__
 #include <AudioUnit/AudioUnit.h>
 #include <AudioToolbox/AudioComponent.h>
+#else
+// Stub types for non-macOS builds (testing only)
+typedef int32_t OSStatus;
+typedef uint32_t UInt32;
+typedef uint32_t AudioUnitPropertyID;
+typedef uint32_t AudioUnitScope;
+typedef uint32_t AudioUnitElement;
+typedef uint32_t Boolean;
+typedef float AudioUnitParameterValue;
+typedef void* AudioTimeStamp;
+typedef void* AudioBufferList;
+typedef void* AudioUnitRenderActionFlags;
+typedef void* AudioStreamBasicDescription;
+typedef void* AudioComponentPlugInInterface;
+typedef void* AudioComponentDescription;
+typedef void* AudioUnitPropertyListenerProc;
+#endif
+
 #include <iostream>
 #include <vector>
 #include <memory>

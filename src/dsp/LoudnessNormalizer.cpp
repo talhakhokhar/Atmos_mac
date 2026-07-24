@@ -1,4 +1,4 @@
-#include "LoudnessNormalizer.h"
+#include "dsp/LoudnessNormalizer.h"
 
 namespace atmos {
 

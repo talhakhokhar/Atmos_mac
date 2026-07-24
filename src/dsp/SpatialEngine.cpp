@@ -1,4 +1,4 @@
-#include "SpatialEngine.h"
+#include "dsp/SpatialEngine.h"
 
 namespace atmos {
 

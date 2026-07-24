@@ -1,4 +1,4 @@
-#include "SurroundGen.h"
+#include "dsp/SurroundGen.h"
 
 namespace atmos {
 

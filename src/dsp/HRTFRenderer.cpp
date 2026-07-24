@@ -1,4 +1,4 @@
-#include "HRTFRenderer.h"
+#include "dsp/HRTFRenderer.h"
 
 namespace atmos {
 

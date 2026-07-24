@@ -1,4 +1,4 @@
-#include "BassManager.h"
+#include "dsp/BassManager.h"
 
 namespace atmos {
 
