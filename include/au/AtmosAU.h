@@ -16,11 +16,17 @@ typedef uint32_t AudioUnitScope;
 typedef uint32_t AudioUnitElement;
 typedef uint32_t Boolean;
 typedef float AudioUnitParameterValue;
-typedef void* AudioTimeStamp;
-typedef void* AudioBufferList;
+typedef uint32_t AudioUnitParameterID;
+// Forward declare stub structures instead of typedef void*
+struct AudioTimeStampStub;
+struct AudioBufferListStub;
+struct AudioStreamBasicDescriptionStub;
+struct AudioComponentPlugInInterfaceStub;
+typedef AudioTimeStampStub* AudioTimeStamp;
+typedef AudioBufferListStub* AudioBufferList;
 typedef void* AudioUnitRenderActionFlags;
-typedef void* AudioStreamBasicDescription;
-typedef void* AudioComponentPlugInInterface;
+typedef AudioStreamBasicDescriptionStub* AudioStreamBasicDescription;
+typedef AudioComponentPlugInInterfaceStub* AudioComponentPlugInInterface;
 typedef void* AudioComponentDescription;
 typedef void* AudioUnitPropertyListenerProc;
 #endif
@@ -70,8 +76,8 @@ private:
     
     UInt32 inputBusCount_ = 1;
     UInt32 outputBusCount_ = 1;
-    AudioStreamBasicDescription inputFormat_ = {};
-    AudioStreamBasicDescription outputFormat_ = {};
+    AudioStreamBasicDescription inputFormat_;
+    AudioStreamBasicDescription outputFormat_;
 
     void syncEngineFromParams();
 

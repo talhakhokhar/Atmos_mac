@@ -67,10 +67,10 @@ struct AudioComponentPlugInInterfaceStub {
     void* reserved;
 };
 
-typedef AudioBufferListStub AudioBufferList;
-typedef AudioStreamBasicDescriptionStub AudioStreamBasicDescription;
-typedef AudioTimeStampStub AudioTimeStamp;
-typedef AudioComponentPlugInInterfaceStub AudioComponentPlugInInterface;
+typedef AudioBufferListStub* AudioBufferList;
+typedef AudioStreamBasicDescriptionStub* AudioStreamBasicDescription;
+typedef AudioTimeStampStub* AudioTimeStamp;
+typedef AudioComponentPlugInInterfaceStub* AudioComponentPlugInInterface;
 typedef void* AudioComponentInstance;
 typedef void* AudioComponentDescription;
 typedef void* AudioUnitRenderActionFlags;
@@ -114,9 +114,38 @@ typedef void* AudioComponentMethod;
 #define kAudioUnitProperty_FactoryPresets 20
 #define kAudioUnitProperty_PresentPreset 21
 #define kAudioUnitProperty_BypassEffect 28
+#define kAudioUnitProperty_ClassInfo 2304
 #define kAudioFormatLinearPCM 1819704624  // 'lpcm' as integer
 #define kAudioFormatFlagIsFloat (1 << 1)
 #define kAudioFormatFlagIsPacked (1 << 3)
+
+// Stub structures for non-macOS builds
+struct AudioUnitParameterInfo {
+    char name[16];
+    void* cfNameString;
+    UInt32 unit;
+    UInt32 flags;
+    float minValue;
+    float maxValue;
+    float defaultValue;
+    UInt32 controlUnit;
+};
+
+struct AUPreset {
+    int32_t presetNumber;
+    void* presetName;
+};
+
+typedef void* CFStringRef;
+#define CFSTR(str) ((CFStringRef)(str))
+
+// Stub constants
+#define kAudioUnitParameterUnit_Generic 0
+#define kAudioUnitParameterUnit_Boolean 1
+#define kAudioUnitParameterFlag_IsWritable (1 << 0)
+#define kAudioUnitParameterFlag_IsReadable (1 << 1)
+#define kAudioUnitParameterFlag_IsElementMeta (1 << 4)
+#define kCFStringEncodingUTF8 0x08000100
 #endif
 
 #include <mutex>
@@ -129,7 +158,7 @@ using namespace atmos;
 // Per-instance storage
 // =============================================================================
 struct AtmospherePlugInInstance {
-    AudioComponentPlugInInterface mPlugInInterface;
+    AudioComponentPlugInInterfaceStub mPlugInInterface;
     AtmosAU* mInstance;
 };
 
@@ -332,7 +361,7 @@ extern "C" {
         plugInstance->mPlugInInterface.Lookup = AtmosAULookup;
         plugInstance->mPlugInInterface.reserved = nullptr;
         plugInstance->mInstance = nullptr;
-        return &plugInstance->mPlugInInterface;
+        return reinterpret_cast<AudioComponentPlugInInterface*>(&plugInstance->mPlugInInterface);
     }
 }
 
@@ -361,16 +390,18 @@ AtmosAU::AtmosAU() {
     params_[static_cast<size_t>(ParamID::Profile)] = 1.0f;
     params_[static_cast<size_t>(ParamID::OutputGain)] = 0.5f;
 
-    inputFormat_.mSampleRate = 48000.0;
-    inputFormat_.mFormatID = kAudioFormatLinearPCM;
-    inputFormat_.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
-    inputFormat_.mBytesPerPacket = 8;
-    inputFormat_.mFramesPerPacket = 1;
-    inputFormat_.mBytesPerFrame = 8;
-    inputFormat_.mChannelsPerFrame = 2;
-    inputFormat_.mBitsPerChannel = 32;
+    // Initialize inputFormat_ structure
+    inputFormat_ = new AudioStreamBasicDescriptionStub();
+    inputFormat_->mSampleRate = 48000.0;
+    inputFormat_->mFormatID = kAudioFormatLinearPCM;
+    inputFormat_->mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    inputFormat_->mBytesPerPacket = 8;
+    inputFormat_->mFramesPerPacket = 1;
+    inputFormat_->mBytesPerFrame = 8;
+    inputFormat_->mChannelsPerFrame = 2;
+    inputFormat_->mBitsPerChannel = 32;
 
-    outputFormat_ = inputFormat_;
+    outputFormat_ = new AudioStreamBasicDescriptionStub(*inputFormat_);
 
     engine_ = std::make_unique<SpatialEngine>();
     for (auto& s : paramSmoothers_) {
@@ -383,7 +414,7 @@ AtmosAU::~AtmosAU() = default;
 
 OSStatus AtmosAU::Initialize() {
     if (initialized_) return noErr;
-    sampleRate_ = static_cast<f32>(inputFormat_.mSampleRate);
+    sampleRate_ = static_cast<f32>(inputFormat_->mSampleRate);
     engine_->setSampleRate(sampleRate_);
     syncEngineFromParams();
     initialized_ = true;
@@ -555,20 +586,21 @@ OSStatus AtmosAU::GetProperty(AudioUnitPropertyID propID, AudioUnitScope scope, 
             }
             break;
         }
-        case kAudioUnitProperty_SupportedNumChannels:
+        case kAudioUnitProperty_SupportedNumChannels: {
             if (scope == kAudioUnitScope_Global) {
-                outDataSize = 4;
-                outWritable = false;
+                UInt32* outDataSizePtr = static_cast<UInt32*>(outData);
+                if (outDataSizePtr) *outDataSizePtr = 4;
                 return noErr;
             }
             break;
+        }
         case kAudioUnitProperty_ParameterInfo: {
             if (scope == kAudioUnitScope_Global && element < static_cast<AudioUnitElement>(ParamID::NumParams)) {
                 auto param = static_cast<ParamID>(static_cast<int>(element));
                 AudioUnitParameterInfo info = {};
                 const char* paramName = getParamName(param);
                 strncpy(info.name, paramName, sizeof(info.name) - 1);
-                info.cfNameString = CFStringCreateWithCString(nullptr, paramName, kCFStringEncodingUTF8);
+                info.cfNameString = nullptr;  // Stub for non-macOS
                 info.minValue = getParamRanges(param).minValue;
                 info.maxValue = getParamRanges(param).maxValue;
                 info.defaultValue = getParamRanges(param).defaultValue;
@@ -680,18 +712,18 @@ OSStatus AtmosAU::Render(AudioUnitRenderActionFlags* ioActionFlags, const AudioT
         return noErr;
     }
 
-    if (ioData == nullptr || ioData->mNumberBuffers < 2) {
+    if (ioData == nullptr || (*ioData)->mNumberBuffers < 2) {
         return kAudio_ParamError;
     }
 
-    f32* inL = static_cast<f32*>(ioData->mBuffers[0].mData);
-    f32* inR = static_cast<f32*>(ioData->mBuffers[1].mData);
+    f32* inL = static_cast<f32*>((*ioData)->mBuffers[0].mData);
+    f32* inR = static_cast<f32*>((*ioData)->mBuffers[1].mData);
     f32* outL = inL;
     f32* outR = inR;
 
-    if (ioData->mNumberBuffers >= 4) {
-        outL = static_cast<f32*>(ioData->mBuffers[2].mData);
-        outR = static_cast<f32*>(ioData->mBuffers[3].mData);
+    if ((*ioData)->mNumberBuffers >= 4) {
+        outL = static_cast<f32*>((*ioData)->mBuffers[2].mData);
+        outR = static_cast<f32*>((*ioData)->mBuffers[3].mData);
     }
 
     bool bypassed = params_[static_cast<size_t>(ParamID::Bypass)] > 0.5f;

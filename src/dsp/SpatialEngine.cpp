@@ -158,18 +158,21 @@ void SpatialEngine::reset() {
 }
 
 void SpatialEngine::processBed(const f32* inL, const f32* inR, f32* outL, f32* outR, i32 numFrames) {
-    // Allocate temporary buffers
-    std::vector<f32> cBuf(numFrames);
-    std::vector<f32> ldBuf(numFrames);
-    std::vector<f32> rdBuf(numFrames);
+    // Ensure buffers are allocated once (should be done in setSampleRate or reset)
+    if (cBuf_.size() != static_cast<size_t>(numFrames)) {
+        cBuf_.resize(numFrames);
+        ldBuf_.resize(numFrames);
+        rdBuf_.resize(numFrames);
+        lsBuf_.resize(numFrames);
+        rsBuf_.resize(numFrames);
+        hfBuf_.resize(numFrames);
+        hrBuf_.resize(numFrames);
+        accL_.resize(numFrames);
+        accR_.resize(numFrames);
+    }
 
     // Extract center
-    centerExtract_.processBlock(inL, inR, cBuf.data(), ldBuf.data(), rdBuf.data(), numFrames);
-
-    // Generate surrounds
-    std::vector<f32> lsBuf(numFrames), rsBuf(numFrames);
-    std::vector<f32> hfBuf(numFrames), hrBuf(numFrames);
-    std::vector<f32> accL(numFrames), accR(numFrames);
+    centerExtract_.processBlock(inL, inR, cBuf_.data(), ldBuf_.data(), rdBuf_.data(), numFrames);
 
     // Simple single-sample version for each frame
     for (i32 n = 0; n < numFrames; ++n) {
@@ -179,7 +182,7 @@ void SpatialEngine::processBed(const f32* inL, const f32* inR, f32* outL, f32* o
         f32 S = 0.5f * (L - R);
 
         f32 ls = 0.0f, rs = 0.0f;
-        surroundGen_.processBlock(S, -S, ls, rs, 1, std::abs(cBuf[n]) > 0.01f);
+        surroundGen_.processBlock(S, -S, ls, rs, 1, std::abs(cBuf_[n]) > 0.01f);
 
         f32 hf = 0.0f, hr = 0.0f;
         heightGen_.processBlock(M, S, hf, hr, 1);
@@ -188,9 +191,9 @@ void SpatialEngine::processBed(const f32* inL, const f32* inR, f32* outL, f32* o
         outR[n] = 0.0f;
 
         // Render bed channels
-        hrtf_.renderObject(ldBuf[n] * width_, -30.0f, 0.0f, 1.2f, objectSize_, outL[n], outR[n]);
-        hrtf_.renderObject(rdBuf[n] * width_, 30.0f, 0.0f, 1.2f, objectSize_, outL[n], outR[n]);
-        hrtf_.renderObject(cBuf[n], 0.0f, 0.0f, 1.0f, objectSize_ * 0.5f, outL[n], outR[n]);
+        hrtf_.renderObject(ldBuf_[n] * width_, -30.0f, 0.0f, 1.2f, objectSize_, outL[n], outR[n]);
+        hrtf_.renderObject(rdBuf_[n] * width_, 30.0f, 0.0f, 1.2f, objectSize_, outL[n], outR[n]);
+        hrtf_.renderObject(cBuf_[n], 0.0f, 0.0f, 1.0f, objectSize_ * 0.5f, outL[n], outR[n]);
         hrtf_.renderObject(ls * surround_, -100.0f, 0.0f, 2.0f, objectSize_, outL[n], outR[n]);
         hrtf_.renderObject(rs * surround_, 100.0f, 0.0f, 2.0f, objectSize_, outL[n], outR[n]);
         hrtf_.renderObject(hf * height_, -45.0f, 35.0f, 2.5f, objectSize_ * 0.8f, outL[n], outR[n]);
