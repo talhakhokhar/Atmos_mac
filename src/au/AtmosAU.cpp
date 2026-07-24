@@ -7,6 +7,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <mutex>
 #include <cstring>
+#include <algorithm>
 
 using namespace atmos;
 
