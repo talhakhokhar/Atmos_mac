@@ -1,0 +1,6686 @@
+### USER
+Let me think about the actual DSP in more detail because "psychoacoustically sound like Dolby Atmos" is the key requirement:
+
+Atmos Object Renderer Architecture:
+
+1.
+Object Layer (up to 128 objects in real Atmos):
+Each object has: position(x,y,z), size, content (audio), gain, priority
+Real-time metadata updates
+2.
+Bed Channels (renderer mixes objects to channels):
+7.1.4 bed: L, R, C, LFE, Lss, Rss, Lrs, Rrs, Ltf, Rtf, Ltb, Rtb
+9.1.6 for home Atmos
+3.
+Renderer (binaural or speaker):
+Object panning: VBAP (Vector Base Amplitude Panning) for speakers
+HRTF for headphones
+For each object:
+Calculate gains to closest 3 speakers (triplet) - VBAP
+Or apply HRTF at object position - binaural
+4.
+Room Model (Atmos uses hybrid):
+Early reflections: 4-12 first-order reflections
+Late reverb: 20+ reflections tail
+Object-aware: reflection positions based on object position
+5.
+LFE Crossover (Atmos has LFE management):
+Crossover at 80-120 Hz
+Bass management from objects to LFE
+For our AU plugin (which receives stereo input from SoundSource), we'll virtualize the input as multiple "objects" in different positions, then render them through the Atmos-like pipeline. Or we can process the input as a "bed" and apply virtual room/space rendering.
+
+Better approach: Treat stereo input as a 7.1.4 bed, then virtualize it with:
+
+Front L/R objects at default positions
+Center, surrounds, heights as derived "phantom" objects
+Apply object-based rendering
+Add virtualization to make stereo feel like Atmos (extract pseudo-objects, render with height cues)
+Even simpler and more effective: Stereo-to-Atmos Virtualizer approach:
+
+Take stereo L/R as inputs
+Apply HRTF-based spatialization that:
+Adds height cues to existing stereo
+Creates phantom objects at varied elevations
+Adds room reflections
+Adds late reverb with height
+Uses surround/center crossfeed
+Applies Atmos-style dynamic processing
+This is what real Atmos upmixers do (Dolby Surround, Neural:X, Auro-Matic).
+
+Let me design the DSP pipeline:
+
+Stage 1: Source Decomposition / Object Generation
+
+Input: Stereo L/R
+Output: ~16-32 virtual objects distributed around listener
+Stage 2: Object Processing (per object)
+
+HRTF (elevation + azimuth)
+ITD (fractional delay)
+ILD (frequency-dependent gain)
+Distance attenuation
+Air absorption (high-shelf rolling off above 4kHz, dependent on distance)
+Doppler (simulated via small pitch shift)
+Stage 3: Object Mixing
+
+Mix all objects to binaural output (L+R channels for headphones)
+Apply crossfeed (natural for headphones)
+Stage 4: Room Processing
+
+Early reflections (4-8 reflections based on object positions)
+Late reverb (convolution or feedback delay network)
+Stage 5: Master Processing
+
+Bass enhancement
+Dialogue enhance (mid boost 1-3kHz)
+Tonal balance
+Output limiter
+HRTF Approach: For efficiency, use a simplified HRTF model:
+
+ITD: spherical head model ITD = (r/c) * (sin(theta) + theta) where r is head radius, c is speed of sound
+ILD: frequency-dependent, especially above 1.5kHz
+Pinna: 2-3 notch filters for elevation detection
+Notch around 6-8kHz (elevation cue)
+Notch around 10-12kHz (front/back cue)
+Use a small HRTF database (e.g., 12 azimuths x 6 elevations)
+Actually for a quality implementation, let me use a small HRTF table with interpolation. But this is complex. Let me use a parametric approach:
+
+ITD: analytic formula
+ILD: pre-computed table
+Pinna: parametric biquad filters
+This is what many professional binaural renderers do for "fast mode" or "preview mode".
+
+Reverb:
+
+Use a Feedback Delay Network (FDN) with 8-16 delay lines
+Allpass scattering matrices
+Input diffusion, output diffusion
+Modulation for naturalness
+Filtered per frequency band for realistic decay
+Air Absorption:
+
+ISO 9613-1 formula: attenuation in dB/m based on frequency
+dB/m = 0.001*(humidity terms)
+Apply as a slowly varying low-pass   *optimize the experience for mac book m1 pro aux output, add headphone and iem specific tunings and psycoacouistics inspired from top audio brands and also try add different sound modes too, like in dolby atmos
+
+### ASSISTANT
+Yes — this is the right direction.
+
+For a **stereo Audio Unit running inside SoundSource**, the most realistic way to get something that *psychoacoustically feels like Dolby Atmos* is **not** to pretend you have 128 true discrete objects. Instead, build a **perceptual object/bed renderer**:
+
+- derive a **stable bed** from stereo,
+- synthesize a small number of **virtual objects / height accents**,
+- render them through a **binaural or line-out spatializer**,
+- add **object-aware room cues**,
+- then finish with **bass management, dialogue control, loudness control, and safety limiting**.
+
+That is the practical “Atmos-like” architecture for a macOS AU plug-in.
+
+Also important:
+
+> **Do not market it as “Dolby Atmos” unless licensed.**  
+> Use terms like **“Immersive”, “Spatial Audio”, “Atmos-inspired”, “3D audio”, “Object-based virtualizer”**.
+
+Below is a full production-grade design optimized for:
+
+- **MacBook M1 Pro**
+- **Aux / headphone jack output**
+- **Headphones + IEMs**
+- **Multiple sound modes**
+- **Premium-brand-inspired psychoacoustic tuning**
+
+---
+
+# 1. Product goal: what “Atmos-like” really means
+
+To sound “Atmos-like”, the listener should perceive:
+
+1. **Stable front image**
+   - dialogue / lead vocal stays centered
+   - instruments do not drift unnaturally
+
+2. **Externalization**
+   - sound feels outside the head, not inside the skull
+
+3. **Height and envelopment**
+   - subtle overhead and rear cues
+   - not just “wider stereo”
+
+4. **Controlled bass**
+   - bass management, not muddy low end
+
+5. **Clear dialogue / vocals**
+   - center intelligibility preserved or enhanced
+
+6. **Comfort over time**
+   - no harsh treble, no fatigue, no excessive reverb
+
+7. **Mono compatibility**
+   - no phase collapse when summed
+
+That is the real target.  
+Not “more reverb” and not “super-wide stereo”.
+
+---
+
+# 2. Important architecture decision for SoundSource
+
+SoundSource will typically feed your AU as:
+
+- **Stereo in**
+- **Stereo out**
+
+So your plug-in should be designed as a **stereo-to-stereo immersive virtualizer**, not a multichannel renderer.
+
+That means the best pipeline is:
+
+> **Stereo input → perceptual bed + virtual objects → binaural/line render → room → master tuning → stereo output**
+
+This is exactly how many upmixers / spatializers work in practice.
+
+---
+
+# 3. Output target matters: MacBook M1 Pro aux output
+
+This is a key part of your request.
+
+The MacBook Pro M1 Pro headphone/aux jack can behave differently depending on what is connected:
+
+- headphones
+- IEMs
+- line out to an amp
+- aux to car / powered speakers
+- USB DAC / interface
+
+Your plug-in should have an **Output Target** selector, and if possible try to auto-detect.
+
+## 3.1 Recommended output targets
+
+### A. Headphones
+- full binaural render
+- crossfeed on
+- HRTF cues on
+- headphone/IEM profile applied
+
+### B. IEMs
+- binaural render
+- stronger externalization
+- gentler treble
+- safer limiting
+- more crossfeed than headphones in many cases
+
+### C. Line / Aux to amp or powered speakers
+- **do not apply full binaural HRTF**
+- use:
+  - stereo widening
+  - mono-safe spatial enhancement
+  - optional subtle room/ambience
+  - EQ/loudness tuning
+
+### D. Car Aux
+- mono-safe
+- vocal clarity
+- loudness normalization
+- bass control
+- reduced extreme stereo effects
+
+### E. Reference / Direct
+- minimal processing
+- flat tuning
+- safety limiter only
+
+---
+
+## 3.2 Auto-detection on macOS
+
+You can try to detect the current output device type via Core Audio HAL properties, for example:
+
+- device UID
+- transport type
+- data source
+- whether output is built-in / external / headphones / line out
+
+In practice, **auto-detection is not perfect**, especially with:
+
+- USB DACs
+- analog cables
+- external amps
+- car aux
+
+So the best UX is:
+
+- **Auto detect if possible**
+- otherwise provide a simple dropdown:
+  - Auto
+  - Headphones
+  - IEMs
+  - Line / Aux
+  - Car Aux
+  - Reference
+
+---
+
+## 3.3 Gain staging for aux output
+
+For analog aux output, you want to avoid clipping downstream.
+
+Recommended defaults:
+
+- **Internal processing:** 32-bit float
+- **Nominal output level:** around -12 dBFS
+- **True peak ceiling:**
+  - Headphones: **-1.0 dBTP**
+  - IEM Safe: **-2.0 dBTP**
+  - Line / Aux: **-1.0 dBTP**
+- **Loudness targets:**
+  - Movie / Immersive: **-16 LUFS**
+  - Music: **-14 LUFS**
+  - Voice / Podcast: **-16 LUFS**
+  - Night: **-20 LUFS**
+  - IEM Safe: **-18 to -20 LUFS**
+
+For sensitive IEMs, also add:
+
+- lower output trim
+- less high-frequency boost
+- stronger limiting
+- optional hearing-safety warning
+
+---
+
+# 4. Recommended DSP architecture
+
+Here is the best architecture for your use case.
+
+## 4.1 High-level block diagram
+
+```text
+Stereo In
+   │
+   ▼
+Input Analysis
+   │
+   ▼
+Source Decomposition
+   ├─ Mid/Side
+   ├─ Center extraction
+   ├─ Ambient extraction
+   ├─ Height synthesis
+   └─ Spectral accent objects
+   │
+   ▼
+Virtual Object / Bed Layer
+   ├─ 7.1.4-like bed
+   ├─ 8–16 virtual objects
+   └─ object gains / positions / size
+   │
+   ▼
+Per-Object Renderer
+   ├─ distance attenuation
+   ├─ air absorption
+   ├─ ITD
+   ├─ ILD
+   ├─ pinna/elevation cues
+   └─ object spread
+   │
+   ▼
+Object Mix Bus
+   │
+   ▼
+Room Model
+   ├─ early reflections
+   └─ late reverb (FDN)
+   │
+   ▼
+Bass Management
+   ├─ crossover
+   ├─ virtual LFE
+   └─ harmonic bass
+   │
+   ▼
+Master Psychoacoustic Chain
+   ├─ tonal tuning
+   ├─ dialogue enhance
+   ├─ crossfeed
+   ├─ loudness normalization
+   ├─ de-ess / harshness control
+   └─ true-peak limiter
+   │
+   ▼
+Stereo Out
+```
+
+This is the right “Atmos-inspired” design for stereo AU.
+
+---
+
+# 5. Stage 1 — Source decomposition from stereo
+
+This is where you create the illusion of objects.
+
+Do **not** just widen stereo.  
+Instead, build a **bed + accents** structure.
+
+---
+
+## 5.1 Mid/Side first
+
+Start with:
+
+```text
+M = (L + R) * 0.5
+S = (L - R) * 0.5
+```
+
+Then derive:
+
+- **center / dialogue**
+- **direct left/right**
+- **surround ambience**
+- **height ambience**
+- **spectral accent objects**
+
+---
+
+## 5.2 Create a 7.1.4-like bed from stereo
+
+Use a fixed bed first. This gives stability.
+
+### Recommended bed positions
+
+| Bed channel | Azimuth | Elevation | Source derivation |
+|---|---:|---:|---|
+| L | -30° | 0° | direct L minus some center |
+| R | +30° | 0° | direct R minus some center |
+| C | 0° | 0° | extracted center / vocal |
+| Lss | -100° | 0° | decorrelated S |
+| Rss | +100° | 0° | decorrelated S |
+| Lrs | -140° | 0° | delayed/decorrelated S |
+| Rrs | +140° | 0° | delayed/decorrelated S |
+| Ltf | -45° | +35° | height ambience |
+| Rtf | +45° | +35° | height ambience |
+| Ltb | -135° | +30° | rear height ambience |
+| Rtb | +135° | +30° | rear height ambience |
+| LFE | — | — | bass-managed low content |
+
+This gives you an Atmos-like **bed** even from stereo.
+
+---
+
+## 5.3 Center / dialogue extraction
+
+A stable center is essential.
+
+A good starting point:
+
+```text
+C_raw = M
+C = bandlimited(M, 200 Hz – 4 kHz) * centerMask
+```
+
+Then:
+
+```text
+L_direct = L - alpha * C
+R_direct = R - alpha * C
+```
+
+Where:
+
+- `alpha` = 0.5 to 0.8
+- `centerMask` is based on:
+  - L/R correlation
+  - speech-band energy
+  - transient coherence
+
+### Why this matters
+If you do not extract and preserve center:
+
+- vocals feel hollow
+- dialogue drifts
+- the mix feels “phasey”
+- it stops sounding premium
+
+This is one of the biggest differences between cheap “3D widening” and Atmos-like rendering.
+
+---
+
+## 5.4 Surround generation
+
+Use the side signal, but **decorrelate** it.
+
+Example:
+
+```text
+Ls = decorrelate(S) delayed 12–20 ms
+Rs = decorrelate(-S) delayed 15–25 ms
+```
+
+Use:
+
+- all-pass decorrelation
+- short delays
+- high-pass around 200–300 Hz
+- level around -6 to -10 dB relative to front
+
+Important:
+
+- **do not send strong center content to surrounds**
+- use center mask to reduce vocal leakage into rear channels
+
+---
+
+## 5.5 Height synthesis
+
+Height is the hardest part to get right.
+
+Best approach:
+
+- do **not** put direct lead vocal overhead
+- send **ambient / diffuse / high-frequency content** to height objects
+
+Example height sources:
+
+```text
+HeightFront = highpassed decorrelated M/S (500 Hz+)
+HeightRear  = highpassed decorrelated S (700 Hz+)
+```
+
+Add:
+
+- small delay: 18–35 ms
+- diffusion
+- lower level than front bed
+- slight high-frequency roll-off for realism
+
+Default height level:
+
+- subtle: **-10 to -14 dB**
+- cinematic: **-6 to -10 dB**
+
+Height should be felt, not shouted.
+
+---
+
+## 5.6 Optional “object accent” layer
+
+If you want it to feel more object-based, add **8 spectral accent objects**.
+
+Split the signal into bands, for example:
+
+- 125 Hz
+- 250 Hz
+- 500 Hz
+- 1 kHz
+- 2 kHz
+- 4 kHz
+- 8 kHz
+- 16 kHz
+
+For each band:
+
+```text
+balance = (L_band - R_band) / (L_band + R_band + eps)
+azimuth = balance * maxAzimuth
+elevation = mode-dependent
+gain = bandEnergy * accentStrength
+```
+
+Example:
+
+- low bands stay near front
+- mid bands stay near ear level
+- high bands can move upward
+- fast transients can become “object accents”
+
+This gives a sense of **moving objects**, not just a static upmix.
+
+But keep it subtle.
+
+Recommended default:
+
+- 8 accent objects
+- smoothing 50–150 ms
+- max azimuth ±60°
+- max elevation +50°
+- accent gain -12 to -6 dB depending on mode
+
+---
+
+# 6. Stage 2 — Object renderer / binaural synthesis
+
+This is where the Atmos-like externalization happens.
+
+For headphones/IEMs, use a **parametric HRTF model** first.  
+It is efficient and good enough for a strong MVP.
+
+---
+
+## 6.1 ITD — interaural time difference
+
+Use a spherical head approximation.
+
+For azimuth `theta` in radians:
+
+```text
+itd = (r / c) * (theta + sin(theta))
+```
+
+Where:
+
+- `r` = head radius ≈ 0.0875 m
+- `c` = speed of sound ≈ 343 m/s
+- max ITD ≈ 0.6–0.7 ms
+
+If source is on the right:
+
+- left ear is delayed
+- right ear is direct
+
+If source is on the left:
+
+- right ear is delayed
+- left ear is direct
+
+Use fractional delay:
+
+- all-pass fractional delay, or
+- Lagrange interpolation
+
+This is essential for externalization.
+
+---
+
+## 6.2 ILD — interaural level difference
+
+ILD should be frequency-dependent.
+
+Approximation:
+
+```text
+ild_dB = maxILD * sin(theta)^p
+```
+
+Where:
+
+- `maxILD` = 12–18 dB
+- `p` = 1.5–2.5
+- apply mostly above 1.5 kHz
+
+Use a high-shelf or multiband gain:
+
+- low frequencies: little ILD
+- high frequencies: more ILD
+
+For right-side source:
+
+- right ear gains up
+- left ear gains down
+
+For left-side source:
+
+- reverse
+
+---
+
+## 6.3 Pinna / elevation cues
+
+Elevation perception comes mostly from spectral shaping.
+
+Use 2–3 parametric notches/shelves.
+
+### A. Elevation notch
+Approximate starting point:
+
+```text
+notch frequency = 6.0 kHz + (elevation_degrees * 30–50 Hz)
+Q = 8–12
+gain = -3 to -8 dB
+```
+
+### B. Front/back cue
+Use another notch or shelf around:
+
+- 9–12 kHz
+
+For rear sources:
+
+- reduce high-frequency direct level
+- add more diffusion
+- slightly increase early reflections
+- reduce transient sharpness
+
+### C. Cone-of-confusion reduction
+Add tiny dynamic variation:
+
+- micro-motion ±0.5° to ±1.5°
+- LFO rate 0.05–0.2 Hz
+- very subtle
+
+This helps reduce front/back confusion and “inside-head” localization.
+
+---
+
+## 6.4 Distance cues
+
+For each object:
+
+```text
+distanceGain = 1 / (1 + d / d0)
+```
+
+Where:
+
+- `d0` ≈ 1.5 m
+
+Also apply:
+
+- high-frequency roll-off with distance
+- more reverb send for distant objects
+- reduced transient sharpness
+
+A simple air absorption model:
+
+```text
+airLowpassFreq = 20000 / (1 + 0.12 * distance_meters)
+```
+
+This is not physically perfect, but psychoacoustically useful.
+
+---
+
+## 6.5 Object size / spread
+
+Atmos objects have “size”.
+
+You can simulate this by rendering one object to:
+
+- center position
+- left spread position
+- right spread position
+
+Example:
+
+```text
+size = 0 → 100% center
+size = 1 → 50% center, 25% left spread, 25% right spread
+```
+
+Use decorrelated taps for large sizes.
+
+This makes objects feel larger and more natural, instead of laser-point localized.
+
+---
+
+# 7. Stage 3 — Room model
+
+Room cues are critical for externalization.
+
+Without room cues, binaural audio often feels:
+
+- inside the head
+- dry
+- artificial
+- fatiguing
+
+You want a hybrid room model:
+
+- **early reflections**
+- **late reverb**
+
+---
+
+## 7.1 Early reflections
+
+Use 6–10 early taps.
+
+Recommended starting delays:
+
+| Tap | Delay | Purpose |
+|---|---:|---|
+| 1 | 5–8 ms | side wall |
+| 2 | 8–12 ms | ceiling |
+| 3 | 12–17 ms | floor / lower reflection |
+| 4 | 17–23 ms | rear wall |
+| 5 | 23–31 ms | second side reflection |
+| 6 | 31–42 ms | ceiling rear |
+
+Gains:
+
+- -9 dB to -20 dB
+
+Direction:
+
+- mirror the object azimuth/elevation roughly
+- height objects should get stronger ceiling reflections
+
+Important:
+
+- use **pre-delay** of 8–20 ms before late reverb
+- keep early reflections discrete enough to support localization
+
+---
+
+## 7.2 Late reverb: FDN
+
+Use an **8-line Feedback Delay Network**.
+
+This is efficient and sounds good when tuned.
+
+### Suggested delay lengths at 48 kHz
+
+Use prime-ish lengths:
+
+```text
+1409, 1783, 2003, 2269, 2591, 2939, 3259, 3517 samples
+```
+
+### Feedback matrix
+Use a Householder matrix:
+
+```text
+y[i] = x[i] - (2/N) * sum(x)
+```
+
+Where `N = 8`.
+
+### Damping
+Use a one-pole low-pass in the feedback loop:
+
+```text
+y = (1 - d) * x + d * y_prev
+```
+
+Where:
+
+- `d` = 0.2 to 0.6
+
+### Modulation
+Add slow delay modulation:
+
+- rate: 0.1–0.5 Hz
+- depth: 3–8 samples
+
+This reduces metallic artifacts.
+
+### Reverb EQ
+Always EQ the reverb return:
+
+- high-pass: 150–250 Hz
+- low-pass: 8–12 kHz
+- reduce mud around 300–600 Hz if needed
+
+### Height reverb
+Send more reverb to height objects than direct signal.
+
+This helps create a convincing overhead space.
+
+---
+
+# 8. Stage 4 — Bass management
+
+This is a major part of the “premium” feel.
+
+Do not just boost bass.
+
+Use **bass management**.
+
+---
+
+## 8.1 Crossover
+
+Default:
+
+- **80 Hz** for headphones
+- **100–120 Hz** for IEM Safe / small drivers
+
+Use Linkwitz-Riley 24 dB/oct if possible.
+
+Route low content to a **virtual LFE bus**.
+
+---
+
+## 8.2 Virtual LFE behavior
+
+For binaural output:
+
+- sum low frequencies mostly to mono
+- below ~120 Hz, localization is weak
+- keep bass controlled and clean
+
+Then return the LFE bus to both ears with:
+
+- minimal ILD
+- minimal ITD
+- gentle saturation optional
+
+---
+
+## 8.3 Harmonic bass enhancement
+
+For IEMs and small headphone drivers, sub-bass boost can distort or feel fake.
+
+Better approach:
+
+- generate harmonics of 50–120 Hz content
+- add 2nd and 3rd harmonics subtly
+- low-pass and mix back in
+
+This gives the perception of deeper bass without overdriving the driver.
+
+Use sparingly.
+
+---
+
+# 9. Stage 5 — Master psychoacoustic chain
+
+This is where you make it feel like a polished product.
+
+---
+
+## 9.1 Tonal tuning
+
+Use output-target-specific EQ.
+
+A good starting “premium consumer” curve:
+
+- low shelf +2 to +4 dB @ 80–120 Hz
+- slight presence boost +1 to +3 dB @ 2–3 kHz
+- air boost +1 to +2 dB @ 10–12 kHz
+- gentle cut -1 to -3 dB @ 5–8 kHz if harsh
+
+For cinema:
+
+- more dialogue presence
+- more bass control
+- slightly smoother treble
+
+For reference:
+
+- flat
+- no artificial brightness
+
+---
+
+## 9.2 Dialogue / vocal enhance
+
+Use a center-aware dynamic EQ or upward compressor.
+
+Focus on:
+
+- 200–400 Hz body
+- 1.5–3 kHz intelligibility
+- de-ess 5–8 kHz
+
+Also add:
+
+- **dialogue ducking**
+  - when center energy is high
+  - duck ambience/reverb by 2–4 dB
+
+This is very “Atmos-like” in movies.
+
+---
+
+## 9.3 Crossfeed
+
+Crossfeed is essential for headphone/IEM naturalness.
+
+Recommended starting points:
+
+| Target | Crossfeed level | Low-pass |
+|---|---:|---:|
+| Headphones | -6 dB | 650–750 Hz |
+| IEMs | -8 to -10 dB | 550–700 Hz |
+| Open-back headphones | -4 to -6 dB | 650 Hz |
+| Closed-back headphones | -6 to -8 dB | 700 Hz |
+| Line / speakers | off or very low | — |
+
+Crossfeed helps:
+
+- externalization
+- fatigue reduction
+- natural imaging
+
+---
+
+## 9.4 Loudness normalization
+
+Use ITU-R BS.1770 / EBU R128 style loudness.
+
+Recommended targets:
+
+| Mode | Target LUFS |
+|---|---:|
+| Movie / Immersive | -16 |
+| Music | -14 |
+| Voice / Podcast | -16 |
+| Night | -20 |
+| Gaming | -18 |
+| IEM Safe | -18 to -20 |
+
+Use slow gain changes:
+
+- attack: ~1 s
+- release: ~3 s
+
+This prevents pumping.
+
+---
+
+## 9.5 True-peak limiter
+
+Always include a safety limiter.
+
+Recommended:
+
+- lookahead: 5 ms normal, 0–1 ms low-latency
+- ceiling:
+  - -1.0 dBTP general
+  - -2.0 dBTP IEM Safe
+- max gain reduction: 6 dB
+- release: 100–300 ms
+
+For low-latency game mode:
+
+- reduce lookahead
+- accept slightly less peak control
+
+---
+
+# 10. Headphone and IEM specific tunings
+
+This is one of the most important parts of your request.
+
+You should not use one tuning for all outputs.
+
+---
+
+## 10.1 Output profile categories
+
+Create internal profiles like:
+
+### Headphone profiles
+1. **Reference / Studio**
+2. **Consumer Premium**
+3. **Warm**
+4. **Bright / Detailed**
+5. **Lifestyle Bass**
+6. **Closed-back**
+7. **Open-back**
+8. **Earbuds**
+9. **High-Z**
+10. **Low-Z / sensitive**
+
+### IEM profiles
+1. **IEM Balanced**
+2. **IEM Bass**
+3. **IEM Safe**
+4. **IEM Externalize**
+5. **IEM Gaming**
+
+### Aux / line profiles
+1. **Line / Aux**
+2. **Car Aux**
+3. **Powered Speakers**
+
+---
+
+## 10.2 Brand-inspired psychoacoustic tuning
+
+Do **not** ship brand names in the UI.  
+Use internal names.
+
+But you can absolutely tune based on common premium signatures.
+
+### Internal tuning inspiration table
+
+| Internal name | Inspired direction | Tuning idea | Spatial behavior |
+|---|---|---|---|
+| REF | studio/reference | flat, neutral, low coloration | accurate, dry |
+| PRM | premium consumer | Harman-like bass + presence | polished, externalized |
+| CIN | cinema | dialogue forward, controlled bass | big, immersive |
+| IMM | immersive flagship | wide object separation, airy | strong height/surround |
+| BAS | lifestyle bass | extended low end, smooth treble | comfortable, big |
+| WRM | warm classic | smooth highs, rich mids | intimate, natural |
+| AIR | detailed flagship | strong treble extension, fast transients | precise, open |
+| IEM-BAL | balanced IEM | reduced 2–4k and 6–9k harshness | externalized, safe |
+| IEM-SAFE | hearing-safe IEM | lower level, gentle treble, strong limiter | comfortable |
+| AUX-LINE | line out | neutral, mono-safe | stable stereo |
+
+This gives you the “top audio brand feel” without legal problems.
+
+---
+
+## 10.3 Headphone-specific psychoacoustics
+
+### Open-back headphones
+- already sound more open
+- use:
+  - less reverb
+  - less artificial width
+  - lighter crossfeed
+  - preserve air
+
+### Closed-back headphones
+- often need more externalization
+- use:
+  - more early reflections
+  - slightly more crossfeed
+  - reduce boxiness around 300–600 Hz
+  - add a little height
+
+### Earbuds
+- weaker isolation and bass
+- use:
+  - modest bass boost
+  - less aggressive treble
+  - medium crossfeed
+  - lower loudness ceiling
+
+### High-impedance headphones
+- may need more gain from the amp
+- plug-in cannot create analog voltage, but you can:
+  - provide output trim
+  - avoid excessive EQ that causes digital clipping
+  - keep true-peak ceiling safe
+
+---
+
+## 10.4 IEM-specific psychoacoustics
+
+IEMs need special treatment.
+
+### Common IEM problems
+- in-head localization
+- excessive isolation
+- driver resonances
+- treble fatigue
+- balanced armature harshness
+- over-perceived bass
+
+### Recommended IEM tuning
+- reduce 2–4 kHz harshness by 1–2 dB
+- reduce 6–9 kHz resonance by 1–3 dB
+- use less sub-bass boost, more harmonic bass
+- stronger crossfeed than many headphones
+- more early reflections for externalization
+- lower loudness ceiling
+- faster safety limiting
+
+### IEM Safe mode
+- target loudness: -18 to -20 LUFS
+- true peak ceiling: -2 dBTP
+- treble boost disabled or limited
+- bass enhancement limited
+- max gain reduction capped
+
+This is very valuable if you want a premium, responsible product.
+
+---
+
+# 11. Sound modes like Dolby Atmos
+
+You asked for different sound modes.
+
+Yes — include these.
+
+A good mode system:
+
+| Mode | Purpose |
+|---|---|
+| Off / Direct | bypass or safety-only |
+| Auto | content-adaptive |
+| Movie / Cinema | Atmos-like immersive |
+| Music | natural width and depth |
+| Game | localization + low latency |
+| Voice / Podcast | dialogue clarity |
+| Night | reduced dynamics, safer listening |
+| Bass+ | bass enhancement |
+| Spatial IEM | externalization for IEMs |
+| Aux / Line | mono-safe line output |
+| Car | loudness + vocal clarity |
+
+---
+
+## 11.1 Recommended mode defaults
+
+### Off / Direct
+- spatializer off
+- EQ off or minimal
+- limiter optional
+
+### Reference
+- flat EQ
+- no height
+- no reverb
+- crossfeed off or very low
+- true-peak safety only
+
+### Auto
+- analyzes input and adjusts:
+  - width
+  - height
+  - dialogue
+  - reverb
+  - bass
+
+Good for users who want one toggle.
+
+### Movie / Cinema
+This is your main “Atmos-like” mode.
+
+Recommended defaults:
+
+- width: 70–90%
+- height: 40–60%
+- surround: 35–50%
+- reverb: 30–45%
+- dialogue: +3 to +5
+- bass: +2 to +3
+- compression: medium
+- loudness: -16 LUFS
+- crossfeed: medium
+
+Goal:
+- big space
+- clear dialogue
+- controlled bass
+- strong envelopment
+
+### Music
+Recommended:
+
+- width: 40–70%
+- height: 10–25%
+- surround: 15–30%
+- reverb: 10–25%
+- dialogue: 0 to +1
+- bass: 0 to +2
+- loudness: -14 LUFS
+
+Goal:
+- natural stage
+- not over-processed
+- preserve mix intent
+
+### Game / FPS
+Recommended:
+
+- width: 60–80%
+- height: 30–50%
+- surround: 40–60%
+- reverb: 10–20%
+- dialogue: +1
+- bass: controlled
+- latency: low-latency mode
+- boost 2–5 kHz slightly for footsteps
+
+Goal:
+- localization accuracy
+- fast transients
+- low latency
+
+### Voice / Podcast
+Recommended:
+
+- width: low
+- height: low
+- surround: very low
+- center: strong
+- dialogue: +4 to +6
+- de-ess: on
+- loudness: -16 LUFS
+
+Goal:
+- intelligibility
+- stable center
+- no weird spatial artifacts
+
+### Night
+Recommended:
+
+- loudness: -20 LUFS
+- compression: high
+- bass: reduced
+- treble: slightly reduced
+- reverb: reduced
+- height: reduced
+
+Goal:
+- quiet listening
+- less fatigue
+- less disturbance
+
+### Bass+
+Recommended:
+
+- bass shelf +3 to +5 dB
+- harmonic bass on
+- limiter engaged
+- keep vocals clear
+
+### IEM Spatial
+Recommended:
+
+- crossfeed high
+- early reflections medium
+- height medium
+- treble smooth
+- loudness safe
+
+Goal:
+- externalization without fatigue
+
+### Aux / Line
+Recommended:
+
+- no full binaural render
+- mono-safe widening
+- subtle ambience
+- EQ/loudness only
+
+### Car
+Recommended:
+
+- mono-safe
+- vocal boost
+- loudness normalization
+- bass control
+- reduced extreme width
+
+---
+
+# 12. Auto mode: simple content classification
+
+You can make a very good Auto mode without machine learning.
+
+Use simple features:
+
+- L/R correlation
+- side energy
+- speech-band energy (300 Hz–3 kHz)
+- low-band energy
+- transient density
+- spectral centroid
+
+## Simple rules
+
+### If:
+- high correlation
+- strong speech band
+- low side energy  
+→ classify as **Voice**
+
+### If:
+- wide stereo
+- musical transients
+- balanced spectrum  
+→ classify as **Music**
+
+### If:
+- wide stereo
+- strong low-frequency content
+- large dynamic swings  
+→ classify as **Movie**
+
+### If:
+- fast transients
+- strong 2–5 kHz directional cues
+- low reverb content  
+→ classify as **Game**
+
+Then blend parameters smoothly instead of hard switching.
+
+---
+
+# 13. M1 Pro optimization
+
+This is very important for a system-wide AU in SoundSource.
+
+You want:
+
+- low CPU
+- low latency
+- stable real-time performance
+- no allocations in the audio thread
+
+---
+
+## 13.1 Recommended implementation constraints
+
+### Use:
+- 32-bit float processing
+- preallocated buffers
+- fixed block processing internally (e.g. 64 or 128 frames)
+- parameter smoothing
+- Accelerate / vDSP where useful
+- NEON-friendly SIMD layouts
+- ms-based delay times so sample rate changes are easy
+
+### Avoid:
+- malloc/free in render
+- locks in render
+- Objective-C messaging in render
+- double precision unless necessary
+- dynamic containers in DSP path
+- branch-heavy per-sample code
+
+---
+
+## 13.2 Apple Silicon DSP tips
+
+For M1 Pro:
+
+- use `vDSP_biquadm` for biquad banks
+- use vector operations for:
+  - gains
+  - mixing
+  - FDN matrix
+  - loudness weighting
+- keep reverb state aligned for SIMD
+- use small lookup tables for:
+  - ITD
+  - ILD
+  - pinna coefficients
+- precompute HRTF coefficient sets for bed positions
+- interpolate parameters over blocks, not per sample if possible
+
+---
+
+## 13.3 Latency budget
+
+For a system-wide audio plug-in, latency matters.
+
+Recommended targets:
+
+### Low-latency mode
+- total added latency: **< 3 ms**
+- limiter lookahead: 0–1 ms
+- reverb still possible because it is parallel
+
+### Normal mode
+- total added latency: **< 8 ms**
+- limiter lookahead: 5 ms
+- more polished mastering chain
+
+For video watching, a little latency is usually tolerable.  
+For gaming, keep it low.
+
+---
+
+## 13.4 CPU budget target
+
+On M1 Pro, aim for:
+
+- **< 1 ms processing time per 128-frame block at 48 kHz**
+- or safely under one core’s real-time budget
+
+Approximate budget:
+
+| Module | Target cost |
+|---|---:|
+| source decomposition | low |
+| 12 bed HRTF channels | medium |
+| 8 accent objects | medium |
+| early reflections | low |
+| 8-line FDN | medium |
+| EQ/dynamics/limiter | medium |
+| total | comfortably real-time |
+
+This is very achievable on M1 Pro if written properly.
+
+---
+
+# 14. AU plug-in design for SoundSource
+
+## 14.1 Plug-in type
+
+Build as:
+
+- **Audio Unit effect**
+- stereo in / stereo out
+
+If you want maximum compatibility:
+
+- ship AUv2-compatible component if possible
+- or AUv3 if your host environment supports it well
+
+For system-wide tools like SoundSource, compatibility matters more than elegance.
+
+---
+
+## 14.2 Important AU properties
+
+Make sure to handle:
+
+- `kAudioUnitProperty_SupportedNumChannels`
+- `kAudioUnitProperty_Latency`
+- tail time for reverb
+- bypass behavior
+- preset persistence
+- parameter automation smoothing
+
+---
+
+## 14.3 Parameter list
+
+Recommended parameters:
+
+### Core
+- Mode
+- Output Target
+- Master Bypass
+- Output Gain
+
+### Spatial
+- Width
+- Height
+- Surround
+- Object Size
+- HRTF Strength
+- Externalization
+
+### Room
+- Room Size
+- Reverb Amount
+- Early Reflection Level
+- Pre-Delay
+
+### Tonality
+- Bass
+- Brightness
+- Dialogue
+- Warmth
+
+### Safety / Master
+- Loudness Normalize
+- Target LUFS
+- Limiter Ceiling
+- Crossfeed
+- Low Latency Mode
+
+### Personalization
+- Head Size
+- Ear Size
+- HRTF Profile
+
+---
+
+# 15. Recommended default tuning
+
+If you want a strong default preset, use this:
+
+## Default: “Immersive Premium”
+
+- Output Target: Headphones
+- Mode: Auto or Movie
+- Width: 75%
+- Height: 45%
+- Surround: 40%
+- Object Size: 35%
+- Reverb: 30%
+- Early reflections: 25%
+- Bass: +2 dB
+- Brightness: +1 dB
+- Dialogue: +3 dB
+- Crossfeed: medium
+- Loudness target: -16 LUFS
+- True peak ceiling: -1.0 dBTP
+- Low latency: off
+
+This should feel:
+
+- big
+- clear
+- premium
+- not fatiguing
+
+---
+
+# 16. Example DSP pseudo-code
+
+Here is a simplified process skeleton.
+
+```cpp
+void process(const float* inL, const float* inR,
+             float* outL, float* outR,
+             int numFrames)
+{
+    for (int n = 0; n < numFrames; ++n)
+    {
+        float L = inL[n];
+        float R = inR[n];
+
+        // 1. Mid/side
+        float M = 0.5f * (L + R);
+        float S = 0.5f * (L - R);
+
+        // 2. Center extraction
+        float C = centerExtract.process(M);
+
+        // 3. Direct bed
+        float Ld = L - alpha * C;
+        float Rd = R - alpha * R;
+
+        // 4. Surround / height derivation
+        float Ls = surroundGen.processLeft(S);
+        float Rs = surroundGen.processRight(S);
+        float Hf = heightGen.processFront(M, S);
+        float Hr = heightGen.processRear(M, S);
+
+        // 5. Render bed objects
+        float dryL = 0.0f, dryR = 0.0f;
+        renderObject(Ld, AZ_L,  EL_0,  DIST_FRONT, dryL, dryR);
+        renderObject(Rd, AZ_R,  EL_0,  DIST_FRONT, dryL, dryR);
+        renderObject(C,  AZ_C,  EL_0,  DIST_FRONT, dryL, dryR);
+        renderObject(Ls, AZ_LS, EL_0,  DIST_SUR,   dryL, dryR);
+        renderObject(Rs, AZ_RS, EL_0,  DIST_SUR,   dryL, dryR);
+        renderObject(Hf, AZ_LTF, EL_TOP_F, DIST_TOP, dryL, dryR);
+        renderObject(Hr, AZ_LTB, EL_TOP_R, DIST_TOP, dryL, dryR);
+
+        // 6. Room
+        float earlyL, earlyR;
+        early.process(dryL, dryR, earlyL, earlyR);
+
+        float wetL, wetR;
+        wetL = wetR = 0.0f;
+        fdn.process(dryL + earlyL, dryR + earlyR, wetL, wetR);
+
+        // 7. Mix
+        float mixL = dryL + earlyL + wetAmount * wetL;
+        float mixR = dryR + earlyR + wetAmount * wetR;
+
+        // 8. Master chain
+        masterEQ.process(mixL, mixR);
+        bassManager.process(mixL, mixR);
+        crossfeed.process(mixL, mixR);
+        loudness.process(mixL, mixR);
+        limiter.process(mixL, mixR);
+
+        outL[n] = mixL;
+        outR[n] = mixR;
+    }
+}
+```
+
+This is simplified, but architecturally correct.
+
+---
+
+# 17. Example HRTF render function
+
+```cpp
+void renderObject(float x,
+                  float azimuthDeg,
+                  float elevationDeg,
+                  float distance,
+                  float &outL,
+                  float &outR)
+{
+    // distance
+    float distGain = 1.0f / (1.0f + distance / 1.5f);
+    x *= distGain;
+
+    // air absorption
+    x = airLowpass.process(x, distance);
+
+    // ITD
+    float theta = azimuthDeg * PI / 180.0f;
+    theta = clamp(theta, -PI/2, PI/2);
+    float itd = (HEAD_RADIUS / SPEED_OF_SOUND) * (theta + sinf(theta));
+
+    float delayL = 0.0f;
+    float delayR = 0.0f;
+
+    if (theta > 0.0f)
+        delayL = itd;   // source right => left ear delayed
+    else
+        delayR = -itd;  // source left => right ear delayed
+
+    // ILD
+    float ild = maxILD * sinf(theta) * sinf(theta);
+    float gainL = powf(10.0f, -ild * 0.5f / 20.0f);
+    float gainR = powf(10.0f, +ild * 0.5f / 20.0f);
+
+    if (theta > 0.0f)
+    {
+        // source right: right louder
+        std::swap(gainL, gainR);
+    }
+
+    // pinna
+    float xL = pinnaL.process(x, azimuthDeg, elevationDeg);
+    float xR = pinnaR.process(x, azimuthDeg, elevationDeg);
+
+    // fractional delay
+    xL = fracDelayL.process(xL, delayL);
+    xR = fracDelayR.process(xR, delayR);
+
+    outL += xL * gainL;
+    outR += xR * gainR;
+}
+```
+
+Again, simplified — but this is the right direction.
+
+---
+
+# 18. Example FDN Householder matrix
+
+```cpp
+void fdnProcess(const float inputL, const float inputR,
+                float &outL, float &outR)
+{
+    float v[8];
+
+    // input diffusion + injection
+    for (int i = 0; i < 8; ++i)
+        v[i] = delayOut[i] + inputGain[i] * (inputL + inputR);
+
+    // Householder feedback matrix
+    float sum = 0.0f;
+    for (int i = 0; i < 8; ++i)
+        sum += v[i];
+
+    for (int i = 0; i < 8; ++i)
+    {
+        float y = v[i] - (2.0f / 8.0f) * sum;
+
+        // damping
+        y = dampingLP[i].process(y);
+
+        // feedback gain based on RT60
+        y *= feedbackGain[i];
+
+        delayIn[i] = y;
+    }
+
+    // output mix
+    outL = 0.0f;
+    outR = 0.0f;
+    for (int i = 0; i < 8; ++i)
+    {
+        outL += delayOut[i] * outGainL[i];
+        outR += delayOut[i] * outGainR[i];
+    }
+}
+```
+
+This kind of FDN can sound very good when tuned carefully.
+
+---
+
+# 19. Psychoacoustic details that make it feel premium
+
+These are the small things that separate “toy spatializer” from “premium product”.
+
+---
+
+## 19.1 Preserve transients
+
+Do not smear transients with too much reverb or decorrelation.
+
+Use transient detection to:
+
+- reduce width slightly on transients
+- reduce reverb send on transients
+- preserve localization
+
+This makes the sound feel more precise.
+
+---
+
+## 19.2 Dialogue ducking
+
+When center / speech energy is high:
+
+- duck surrounds by 2–4 dB
+- duck reverb by 2–3 dB
+- slightly boost presence
+
+This creates a very “cinema engine” feel.
+
+---
+
+## 19.3 Harshness control
+
+Use dynamic EQ or de-essing on:
+
+- 2–4 kHz
+- 5–8 kHz
+
+Especially for IEMs.
+
+This reduces fatigue dramatically.
+
+---
+
+## 19.4 Avoid over-widening
+
+If correlation drops too low:
+
+- reduce width
+- reduce side level
+- increase center stability
+
+This prevents phasey, hollow sound.
+
+---
+
+## 19.5 Use micro-motion
+
+Very slow position drift helps externalization.
+
+But keep it tiny:
+
+- ±0.5° to ±1.5°
+- very slow LFO
+- disabled in Reference mode
+
+---
+
+# 20. Recommended preset system
+
+You should ship with a small number of high-quality presets.
+
+## Suggested presets
+
+1. **Immersive Premium**
+2. **Cinema**
+3. **Music Natural**
+4. **Gaming Precision**
+5. **Podcast Voice**
+6. **Night Listening**
+7. **IEM Safe**
+8. **IEM Spatial**
+9. **Aux Line**
+10. **Car**
+11. **Reference**
+12. **Bass+**
+
+That is enough for a strong product.
+
+---
+
+# 21. Recommended development roadmap
+
+## Phase 1 — MVP
+Build:
+
+- stereo in/out AU
+- M/S decomposition
+- 7.1.4-like bed
+- parametric HRTF
+- crossfeed
+- basic EQ
+- safety limiter
+- 3 modes:
+  - Off
+  - Immersive
+  - Voice
+
+This alone can sound very good.
+
+---
+
+## Phase 2 — Room + modes
+Add:
+
+- early reflections
+- FDN reverb
+- bass management
+- loudness normalization
+- full mode system
+- headphone/IEM profiles
+
+This is where it starts feeling premium.
+
+---
+
+## Phase 3 — Polish
+Add:
+
+- spectral accent objects
+- Auto mode
+- personal HRTF parameters
+- optional SOFA HRTF import
+- high-quality true-peak limiter
+- metering
+- A/B preset comparison
+
+---
+
+## Phase 4 — Advanced
+Optional:
+
+- head tracking integration
+- personalized HRTF from ear photos
+- room calibration via mic
+- ML-based object extraction
+
+But I would not start there.
+
+---
+
+# 22. What to avoid
+
+Avoid these common mistakes:
+
+### 1. Fake stereo widening only
+That does not sound like Atmos.
+
+### 2. Too much height
+Height should be subtle.
+
+### 3. Sending vocals to surrounds
+This breaks realism.
+
+### 4. No bass management
+This makes it sound muddy.
+
+### 5. No crossfeed
+This causes inside-head localization.
+
+### 6. Too much reverb
+This causes fatigue and blur.
+
+### 7. No mono compatibility check
+This causes phase collapse.
+
+### 8. High latency in game mode
+This ruins gaming use.
+
+---
+
+# 23. Final recommended architecture for your plug-in
+
+If I were building this, I would use this exact strategy:
+
+## Core engine
+- stereo in / stereo out AU
+- 7.1.4-like virtual bed
+- 8 optional spectral accent objects
+- parametric HRTF renderer
+- early reflections + 8-line FDN
+- bass management
+- master loudness + limiter
+
+## Output intelligence
+- Output Target selector:
+  - Auto
+  - Headphones
+  - IEMs
+  - Line / Aux
+  - Car
+  - Reference
+
+## Tuning system
+- Headphone profiles
+- IEM profiles
+- Aux profiles
+- Brand-inspired internal tuning curves
+
+## Modes
+- Off
+- Auto
+- Movie
+- Music
+- Game
+- Voice
+- Night
+- Bass+
+- IEM Spatial
+- Aux / Line
+
+## M1 Pro optimization
+- 32-bit float
+- preallocated buffers
+- Accelerate/vDSP
+- no allocations in render
+- low-latency mode
+- parameter smoothing
+
+---
+
+# 24. My strongest recommendation
+
+For your use case, the best “Atmos-like” design is:
+
+> **Bed-first, object-accent-second.**
+
+Meaning:
+
+1. Build a very stable 7.1.4-like bed from stereo.
+2. Add a small number of moving spectral objects only as accents.
+3. Render everything with parametric HRTF + room cues.
+4. Tune separately for headphones, IEMs, and aux/line.
+5. Add sound modes like Movie / Music / Game / Voice / Night.
+
+That will sound much more convincing than trying to extract “real objects” from stereo in a complicated way.
+
+---
+
+If you want, I can next give you one of these three:
+
+1. **A complete AU DSP block diagram with exact module order and parameter defaults**
+2. **A C++ / Swift skeleton for the AU plug-in and render engine**
+3. **A full preset/tuning matrix for Headphones, IEMs, and Aux modes**
+
+### USER
+build it for me
+
+### ASSISTANT
+I can’t directly compile/install software on your Mac from this chat, but I can do the next best thing: **give you a complete buildable macOS AU starter project** that you can compile in a few minutes.
+
+This is a **real Audio Unit effect** for SoundSource:
+
+- Stereo in / stereo out
+- Works as a system AU in SoundSource
+- Built with JUCE + C++
+- Optimized for Apple Silicon / M1 Pro
+- Includes:
+  - Off / Reference / Auto / Immersive / Movie / Music / Game / Voice / Night / Bass+ / IEM Safe / Aux Line modes
+  - Headphones / IEM / Line / Car output targets
+  - Width / height / reverb / crossfeed / bass / brightness / dialogue controls
+  - Safety limiter
+  - Basic “Atmos-inspired” spatialization engine
+
+This is **not the final full object/HRTF engine**, but it is a **working foundation** you can build and use immediately. Then we can upgrade the DSP core to the full object renderer without changing the AU shell.
+
+> Important: do not name the product “Dolby Atmos” in the UI unless licensed. Use “Immersive Audio”, “Spatial Audio”, etc.
+
+---
+
+# 1. Create the project folder
+
+Open Terminal and run:
+
+```bash
+mkdir ImmersiveAU
+cd ImmersiveAU
+git clone --depth 1 --branch 8.0.4 https://github.com/juce-framework/JUCE.git
+mkdir Source
+```
+
+If you do not have CMake:
+
+```bash
+brew install cmake
+```
+
+If you do not have Xcode command line tools:
+
+```bash
+xcode-select --install
+```
+
+---
+
+# 2. Save this as `CMakeLists.txt`
+
+Create:
+
+```bash
+nano CMakeLists.txt
+```
+
+Paste:
+
+```cmake
+cmake_minimum_required(VERSION 3.22)
+
+project(ImmersiveAU VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_subdirectory(JUCE)
+
+juce_add_plugin(ImmersiveAU
+    FORMATS AU Standalone
+    PLUGIN_MANUFACTURER_CODE "Immr"
+    PLUGIN_CODE "ImAU"
+    COMPANY_NAME "ImmersiveAudio"
+    BUNDLE_ID com.immersiveaudio.immersiveau
+    PRODUCT_NAME "ImmersiveAU"
+    VERSION ${PROJECT_VERSION}
+    IS_SYNTH FALSE
+    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_OUTPUT FALSE
+    IS_MIDI_EFFECT FALSE
+    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    COPY_PLUGIN_AFTER_BUILD FALSE
+)
+
+juce_generate_juce_header(ImmersiveAU)
+
+target_sources(ImmersiveAU PRIVATE
+    Source/PluginProcessor.cpp
+)
+
+target_include_directories(ImmersiveAU PRIVATE
+    Source
+)
+
+target_compile_definitions(ImmersiveAU PUBLIC
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_VST3_CAN_REPLACE_VST2=0
+)
+
+target_link_libraries(ImmersiveAU PRIVATE
+    juce::juce_audio_utils
+    juce::juce_dsp
+)
+```
+
+Save with `Ctrl+O`, Enter, `Ctrl+X`.
+
+---
+
+# 3. Save this as `Source/PluginProcessor.h`
+
+Create:
+
+```bash
+nano Source/PluginProcessor.h
+```
+
+Paste:
+
+```cpp
+#pragma once
+
+#include <JuceHeader.h>
+
+class ImmersiveAUAudioProcessor : public juce::AudioProcessor
+{
+public:
+    ImmersiveAUAudioProcessor();
+    ~ImmersiveAUAudioProcessor() override;
+
+    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    void releaseResources() override;
+
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
+
+    void processBlock (juce::AudioBuffer<float>& buffer,
+                       juce::MidiBuffer& midiMessages) override;
+
+    juce::AudioProcessorEditor* createEditor() override;
+    bool hasEditor() const override;
+
+    const juce::String getName() const override;
+
+    bool acceptsMidi() const override;
+    bool producesMidi() const override;
+    bool isMidiEffect() const override;
+    double getTailLengthSeconds() const override;
+
+    int getNumPrograms() override;
+    int getCurrentProgram() override;
+    void setCurrentProgram (int index) override;
+    const juce::String getProgramName (int index) override;
+    void changeProgramName (int index, const juce::String& newName) override;
+
+    void getStateInformation (juce::MemoryBlock& destData) override;
+    void setStateInformation (const void* data, int sizeInBytes) override;
+
+    juce::AudioProcessorValueTreeState parameters;
+
+private:
+    struct DSP;
+    std::unique_ptr<DSP> dsp;
+
+    std::atomic<float>* modeParam        = nullptr;
+    std::atomic<float>* outputParam      = nullptr;
+    std::atomic<float>* intensityParam   = nullptr;
+    std::atomic<float>* bassParam        = nullptr;
+    std::atomic<float>* brightParam      = nullptr;
+    std::atomic<float>* dialogueParam    = nullptr;
+    std::atomic<float>* crossfeedParam   = nullptr;
+    std::atomic<float>* outputGainParam  = nullptr;
+    std::atomic<float>* ceilingParam     = nullptr;
+
+    static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ImmersiveAUAudioProcessor)
+};
+```
+
+Save.
+
+---
+
+# 4. Save this as `Source/PluginProcessor.cpp`
+
+Create:
+
+```bash
+nano Source/PluginProcessor.cpp
+```
+
+Paste the following large file.
+
+```cpp
+#include "PluginProcessor.h"
+
+#include <cmath>
+#include <algorithm>
+
+using namespace juce;
+
+static constexpr float kPi = 3.14159265358979323846f;
+
+//==============================================================================
+// Basic DSP helpers
+//==============================================================================
+
+struct Biquad
+{
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+    float x1[2] = {0.0f, 0.0f}, x2[2] = {0.0f, 0.0f};
+    float y1[2] = {0.0f, 0.0f}, y2[2] = {0.0f, 0.0f};
+
+    void reset()
+    {
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            x1[ch] = x2[ch] = y1[ch] = y2[ch] = 0.0f;
+        }
+    }
+
+    void setCoefficients(float B0, float B1, float B2, float A1, float A2)
+    {
+        b0 = B0;
+        b1 = B1;
+        b2 = B2;
+        a1 = A1;
+        a2 = A2;
+    }
+
+    float process(float x, int ch)
+    {
+        float y = b0 * x + b1 * x1[ch] + b2 * x2[ch] - a1 * y1[ch] - a2 * y2[ch];
+
+        x2[ch] = x1[ch];
+        x1[ch] = x;
+
+        y2[ch] = y1[ch];
+        y1[ch] = y;
+
+        return y;
+    }
+
+    void setHighPass(double sr, float freq, float q = 0.707f)
+    {
+        freq = jlimit(20.0f, (float) sr * 0.499f, freq);
+
+        float w0 = 2.0f * kPi * freq / (float) sr;
+        float cosw = std::cos(w0);
+        float sinw = std::sin(w0);
+        float alpha = sinw / (2.0f * q);
+
+        float a0 = 1.0f + alpha;
+
+        setCoefficients(((1.0f + cosw) * 0.5f) / a0,
+                        (-(1.0f + cosw)) / a0,
+                        ((1.0f + cosw) * 0.5f) / a0,
+                        (-2.0f * cosw) / a0,
+                        (1.0f - alpha) / a0);
+    }
+
+    void setLowShelf(double sr, float freq, float gainDb)
+    {
+        if (std::abs(gainDb) < 0.01f)
+        {
+            setCoefficients(1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            return;
+        }
+
+        freq = jlimit(20.0f, (float) sr * 0.499f, freq);
+
+        float A = std::pow(10.0f, gainDb / 40.0f);
+        float w0 = 2.0f * kPi * freq / (float) sr;
+        float cosw = std::cos(w0);
+        float sinw = std::sin(w0);
+
+        // Simple shelf slope.
+        float alpha = sinw * 0.5f * std::sqrt(2.0f);
+        float sq = 2.0f * std::sqrt(A) * alpha;
+
+        float b0 = A * ((A + 1.0f) - (A - 1.0f) * cosw + sq);
+        float b1 = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cosw);
+        float b2 = A * ((A + 1.0f) - (A - 1.0f) * cosw - sq);
+
+        float a0 = (A + 1.0f) + (A - 1.0f) * cosw + sq;
+        float a1 = -2.0f * ((A - 1.0f) + (A + 1.0f) * cosw);
+        float a2 = (A + 1.0f) + (A - 1.0f) * cosw - sq;
+
+        setCoefficients(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+    }
+
+    void setHighShelf(double sr, float freq, float gainDb)
+    {
+        if (std::abs(gainDb) < 0.01f)
+        {
+            setCoefficients(1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            return;
+        }
+
+        freq = jlimit(20.0f, (float) sr * 0.499f, freq);
+
+        float A = std::pow(10.0f, gainDb / 40.0f);
+        float w0 = 2.0f * kPi * freq / (float) sr;
+        float cosw = std::cos(w0);
+        float sinw = std::sin(w0);
+
+        float alpha = sinw * 0.5f * std::sqrt(2.0f);
+        float sq = 2.0f * std::sqrt(A) * alpha;
+
+        float b0 = A * ((A + 1.0f) + (A - 1.0f) * cosw + sq);
+        float b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cosw);
+        float b2 = A * ((A + 1.0f) + (A - 1.0f) * cosw - sq);
+
+        float a0 = (A + 1.0f) - (A - 1.0f) * cosw + sq;
+        float a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cosw);
+        float a2 = (A + 1.0f) - (A - 1.0f) * cosw - sq;
+
+        setCoefficients(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+    }
+
+    void setPeaking(double sr, float freq, float gainDb, float q)
+    {
+        if (std::abs(gainDb) < 0.01f)
+        {
+            setCoefficients(1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            return;
+        }
+
+        freq = jlimit(20.0f, (float) sr * 0.499f, freq);
+
+        float A = std::pow(10.0f, gainDb / 40.0f);
+        float w0 = 2.0f * kPi * freq / (float) sr;
+        float cosw = std::cos(w0);
+        float sinw = std::sin(w0);
+        float alpha = sinw / (2.0f * q);
+
+        float b0 = 1.0f + alpha * A;
+        float b1 = -2.0f * cosw;
+        float b2 = 1.0f - alpha * A;
+
+        float a0 = 1.0f + alpha / A;
+        float a1 = -2.0f * cosw;
+        float a2 = 1.0f - alpha / A;
+
+        setCoefficients(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+    }
+};
+
+//==============================================================================
+
+struct OnePoleLP
+{
+    float a = 0.0f;
+    float y[2] = {0.0f, 0.0f};
+
+    void reset()
+    {
+        y[0] = y[1] = 0.0f;
+    }
+
+    void setCutoff(double sr, float freq)
+    {
+        if (sr <= 0.0)
+            return;
+
+        freq = jlimit(20.0f, (float) sr * 0.49f, freq);
+        a = 1.0f - std::exp(-2.0f * kPi * freq / (float) sr);
+    }
+
+    float process(float x, int ch)
+    {
+        y[ch] += a * (x - y[ch]);
+        return y[ch];
+    }
+};
+
+//==============================================================================
+
+struct DelayLine
+{
+    std::vector<float> buffer;
+    int write = 0;
+    int delaySamples = 0;
+
+    void prepare(int maxDelaySamples)
+    {
+        maxDelaySamples = std::max(1, maxDelaySamples);
+        buffer.assign((size_t) maxDelaySamples + 1, 0.0f);
+        write = 0;
+        delaySamples = 0;
+    }
+
+    void reset()
+    {
+        std::fill(buffer.begin(), buffer.end(), 0.0f);
+        write = 0;
+    }
+
+    void setDelaySamples(int d)
+    {
+        if (buffer.empty())
+            return;
+
+        delaySamples = jlimit(0, (int) buffer.size() - 1, d);
+    }
+
+    void push(float x)
+    {
+        if (buffer.empty())
+            return;
+
+        buffer[(size_t) write] = x;
+
+        if (++write >= (int) buffer.size())
+            write = 0;
+    }
+
+    float read() const
+    {
+        return read(delaySamples);
+    }
+
+    float read(int d) const
+    {
+        if (buffer.empty())
+            return 0.0f;
+
+        d = jlimit(0, (int) buffer.size() - 1, d);
+
+        int idx = write - 1 - d;
+
+        if (idx < 0)
+            idx += (int) buffer.size();
+
+        return buffer[(size_t) idx];
+    }
+};
+
+//==============================================================================
+// Very small FDN reverb for envelopment.
+//==============================================================================
+
+struct FDNReverb
+{
+    DelayLine lines[4];
+    OnePoleLP damp[4];
+
+    int delaySamples[4] = {0, 0, 0, 0};
+
+    float feedback = 0.70f;
+
+    float inputGain[4] =
+    {
+        0.55f, 0.45f, 0.45f, 0.55f
+    };
+
+    float outGainL[4] =
+    {
+        0.55f, -0.45f, 0.35f, -0.35f
+    };
+
+    float outGainR[4] =
+    {
+        0.55f, 0.45f, -0.35f, -0.35f
+    };
+
+    void reset()
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            lines[i].reset();
+            damp[i].reset();
+        }
+    }
+
+    void prepare(double sr)
+    {
+        reset();
+
+        int maxDelay = (int) (sr * 0.20) + 100;
+
+        static const int base[4] =
+        {
+            1409, 1783, 2003, 2269
+        };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            lines[i].prepare(maxDelay);
+
+            int d = (int) ((double) base[i] * sr / 48000.0);
+            d = jlimit(1, maxDelay, d);
+
+            lines[i].setDelaySamples(d);
+            delaySamples[i] = d;
+
+            damp[i].setCutoff(sr, 3500.0f);
+        }
+    }
+
+    void setParams(float amount, double sr)
+    {
+        amount = jlimit(0.0f, 1.0f, amount);
+
+        feedback = 0.55f + 0.34f * amount;
+
+        float dampFreq = 5000.0f - 3000.0f * amount;
+        dampFreq = jlimit(500.0f, 8000.0f, dampFreq);
+
+        for (int i = 0; i < 4; ++i)
+            damp[i].setCutoff(sr, dampFreq);
+    }
+
+    void process(float input, float& outL, float& outR)
+    {
+        float out[4];
+        float v[4];
+        float sumV = 0.0f;
+
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = lines[i].read();
+            v[i] = out[i] + input * inputGain[i];
+            sumV += v[i];
+        }
+
+        float l = 0.0f;
+        float r = 0.0f;
+
+        for (int i = 0; i < 4; ++i)
+        {
+            // Householder-like matrix.
+            float y = v[i] - 0.5f * sumV;
+
+            y = damp[i].process(y, 0);
+            y *= feedback;
+
+            lines[i].push(y);
+
+            l += out[i] * outGainL[i];
+            r += out[i] * outGainR[i];
+        }
+
+        outL = l * 0.40f;
+        outR = r * 0.40f;
+    }
+};
+
+//==============================================================================
+// Simple height/air bus.
+// This is not a true HRTF height engine yet, but it gives height-like air.
+//==============================================================================
+
+struct HeightBus
+{
+    Biquad hp;
+    Biquad notch;
+    Biquad shelf;
+
+    DelayLine delayL;
+    DelayLine delayR;
+
+    int dL = 0;
+    int dR = 0;
+
+    void reset()
+    {
+        hp.reset();
+        notch.reset();
+        shelf.reset();
+        delayL.reset();
+        delayR.reset();
+    }
+
+    void prepare(double sr)
+    {
+        reset();
+
+        hp.setHighPass(sr, 500.0f);
+        notch.setPeaking(sr, 6500.0f, -4.0f, 8.0f);
+        shelf.setHighShelf(sr, 9000.0f, 3.0f);
+
+        int maxDelay = (int) (sr * 0.06) + 50;
+
+        delayL.prepare(maxDelay);
+        delayR.prepare(maxDelay);
+
+        dL = (int) (sr * 0.018);
+        dR = (int) (sr * 0.023);
+
+        delayL.setDelaySamples(dL);
+        delayR.setDelaySamples(dR);
+    }
+
+    void process(float side, float& outL, float& outR)
+    {
+        float x = hp.process(side, 0);
+
+        delayL.push(x);
+        delayR.push(x);
+
+        float l = delayL.read();
+        float r = delayR.read();
+
+        l = notch.process(l, 0);
+        r = notch.process(r, 1);
+
+        l = shelf.process(l, 0);
+        r = shelf.process(r, 1);
+
+        outL = l;
+        outR = r;
+    }
+};
+
+//==============================================================================
+
+struct Limiter
+{
+    double sampleRate = 48000.0;
+
+    std::vector<float> bufL;
+    std::vector<float> bufR;
+
+    int write = 0;
+    int delaySamples = 0;
+
+    float gain = 1.0f;
+    float threshold = 0.891f; // -1 dB
+
+    float attackCoeff = 0.1f;
+    float releaseCoeff = 0.001f;
+
+    void reset()
+    {
+        std::fill(bufL.begin(), bufL.end(), 0.0f);
+        std::fill(bufR.begin(), bufR.end(), 0.0f);
+        write = 0;
+        gain = 1.0f;
+    }
+
+    void prepare(double sr)
+    {
+        sampleRate = sr;
+
+        delaySamples = std::max(1, (int) (sr * 0.005)); // 5 ms
+
+        bufL.assign((size_t) delaySamples + 1, 0.0f);
+        bufR.assign((size_t) delaySamples + 1, 0.0f);
+
+        attackCoeff = 1.0f - std::exp(-1.0f / (sampleRate * 0.001));
+        releaseCoeff = 1.0f - std::exp(-1.0f / (sampleRate * 0.100));
+
+        reset();
+    }
+
+    void setThresholdDb(float db)
+    {
+        threshold = std::max(0.001f, (float) Decibels::decibelsToGain(db));
+    }
+
+    void process(float& l, float& r)
+    {
+        if (bufL.empty() || bufR.empty())
+            return;
+
+        bufL[(size_t) write] = l;
+        bufR[(size_t) write] = r;
+
+        int readIdx = write - delaySamples;
+
+        if (readIdx < 0)
+            readIdx += (int) bufL.size();
+
+        float delayedL = bufL[(size_t) readIdx];
+        float delayedR = bufR[(size_t) readIdx];
+
+        if (++write >= (int) bufL.size())
+            write = 0;
+
+        float peak = std::max(std::abs(delayedL), std::abs(delayedR));
+
+        float target = 1.0f;
+
+        if (peak > threshold && peak > 0.000001f)
+            target = threshold / peak;
+
+        target = std::min(1.0f, target);
+
+        float coeff = (target < gain) ? attackCoeff : releaseCoeff;
+        gain += coeff * (target - gain);
+
+        l = delayedL * gain;
+        r = delayedR * gain;
+    }
+};
+
+//==============================================================================
+
+struct RenderSettings
+{
+    bool bypass = true;
+
+    float widthLinear = 1.0f;
+    float heightGain = 0.0f;
+    float reverbMix = 0.0f;
+    float crossfeedGain = 0.0f;
+    float outputGain = 1.0f;
+
+    float bassDb = 0.0f;
+    float brightDb = 0.0f;
+    float dialogueDb = 0.0f;
+    float ceilingDb = -1.0f;
+};
+
+//==============================================================================
+// Main DSP core.
+// This will later be replaced by the full object/HRTF renderer.
+//==============================================================================
+
+struct ImmersiveAUAudioProcessor::DSP
+{
+    double sampleRate = 48000.0;
+
+    Biquad hp;
+    Biquad lowShelf;
+    Biquad midPeak;
+    Biquad highShelf;
+
+    OnePoleLP crossLP;
+
+    HeightBus heightBus;
+    FDNReverb reverb;
+    Limiter limiter;
+
+    RenderSettings settings;
+
+    void reset()
+    {
+        hp.reset();
+        lowShelf.reset();
+        midPeak.reset();
+        highShelf.reset();
+
+        crossLP.reset();
+
+        heightBus.reset();
+        reverb.reset();
+        limiter.reset();
+    }
+
+    void prepare(double sr)
+    {
+        sampleRate = sr;
+
+        reset();
+
+        heightBus.prepare(sr);
+        reverb.prepare(sr);
+        limiter.prepare(sr);
+
+        crossLP.setCutoff(sr, 700.0f);
+    }
+
+    void update(const RenderSettings& s)
+    {
+        settings = s;
+
+        hp.setHighPass(sampleRate, 20.0f);
+        lowShelf.setLowShelf(sampleRate, 100.0f, settings.bassDb);
+        midPeak.setPeaking(sampleRate, 2500.0f, settings.dialogueDb, 1.0f);
+        highShelf.setHighShelf(sampleRate, 10000.0f, settings.brightDb);
+
+        crossLP.setCutoff(sampleRate, 700.0f);
+
+        reverb.setParams(settings.reverbMix, sampleRate);
+        limiter.setThresholdDb(settings.ceilingDb);
+    }
+
+    void processSample(float& l, float& r)
+    {
+        if (settings.bypass)
+            return;
+
+        // Safety high-pass.
+        l = hp.process(l, 0);
+        r = hp.process(r, 1);
+
+        // Mid/side.
+        float m = 0.5f * (l + r);
+        float s = 0.5f * (l - r);
+
+        // Width.
+        float side = s * settings.widthLinear;
+
+        l = m + side;
+        r = m - side;
+
+        // Height/air.
+        if (settings.heightGain > 0.0001f)
+        {
+            float hL = 0.0f;
+            float hR = 0.0f;
+
+            heightBus.process(side, hL, hR);
+
+            l += hL * settings.heightGain;
+            r += hR * settings.heightGain;
+        }
+
+        // Reverb/envelopment.
+        if (settings.reverbMix > 0.0001f)
+        {
+            float rL = 0.0f;
+            float rR = 0.0f;
+
+            reverb.process(m, rL, rR);
+
+            l += rL * settings.reverbMix;
+            r += rR * settings.reverbMix;
+        }
+
+        // Tone.
+        l = lowShelf.process(l, 0);
+        r = lowShelf.process(r, 1);
+
+        l = midPeak.process(l, 0);
+        r = midPeak.process(r, 1);
+
+        l = highShelf.process(l, 0);
+        r = highShelf.process(r, 1);
+
+        // Crossfeed.
+        float lpL = crossLP.process(l, 0);
+        float lpR = crossLP.process(r, 1);
+
+        if (settings.crossfeedGain > 0.0001f)
+        {
+            float cf = settings.crossfeedGain;
+            float norm = 1.0f / (1.0f + cf);
+
+            float mixL = (l + cf * lpR) * norm;
+            float mixR = (r + cf * lpL) * norm;
+
+            l = mixL;
+            r = mixR;
+        }
+
+        // Output gain.
+        l *= settings.outputGain;
+        r *= settings.outputGain;
+
+        // Safety limiter.
+        limiter.process(l, r);
+    }
+};
+
+//==============================================================================
+
+struct PresetValues
+{
+    bool bypass = false;
+
+    float width = 100.0f;
+    float height = 0.0f;
+    float reverb = 0.0f;
+    float crossfeed = 50.0f;
+
+    float bass = 0.0f;
+    float bright = 0.0f;
+    float dialogue = 0.0f;
+
+    float ceiling = -1.0f;
+};
+
+static PresetValues getPreset(int mode)
+{
+    switch (mode)
+    {
+        case 0: // Off
+            return { true, 100.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f };
+
+        case 1: // Reference
+            return { false, 100.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f };
+
+        case 2: // Auto
+            return { false, 115.0f, 35.0f, 25.0f, 60.0f, 1.0f, 1.0f, 1.0f, -1.0f };
+
+        case 3: // Immersive
+            return { false, 120.0f, 45.0f, 30.0f, 60.0f, 2.0f, 1.0f, 2.0f, -1.0f };
+
+        case 4: // Movie
+            return { false, 130.0f, 55.0f, 40.0f, 65.0f, 3.0f, 0.0f, 4.0f, -1.0f };
+
+        case 5: // Music
+            return { false, 110.0f, 25.0f, 20.0f, 55.0f, 1.0f, 1.0f, 0.0f, -1.0f };
+
+        case 6: // Game
+            return { false, 120.0f, 45.0f, 15.0f, 50.0f, 0.0f, 2.0f, 1.0f, -1.0f };
+
+        case 7: // Voice
+            return { false, 70.0f, 10.0f, 10.0f, 40.0f, 0.0f, 0.0f, 5.0f, -1.0f };
+
+        case 8: // Night
+            return { false, 90.0f, 20.0f, 15.0f, 60.0f, -2.0f, -1.0f, 3.0f, -1.0f };
+
+        case 9: // Bass+
+            return { false, 110.0f, 30.0f, 25.0f, 60.0f, 5.0f, 0.0f, 1.0f, -1.0f };
+
+        case 10: // IEM Safe
+            return { false, 90.0f, 30.0f, 25.0f, 80.0f, 1.0f, -2.0f, 2.0f, -2.0f };
+
+        case 11: // Aux Line
+            return { false, 105.0f, 0.0f, 8.0f, 0.0f, 1.0f, 0.0f, 1.0f, -1.0f };
+
+        default:
+            return { false, 120.0f, 45.0f, 30.0f, 60.0f, 2.0f, 1.0f, 2.0f, -1.0f };
+    }
+}
+
+//==============================================================================
+
+juce::AudioProcessorValueTreeState::ParameterLayout
+ImmersiveAUAudioProcessor::createParameterLayout()
+{
+    std::vector<std::unique_ptr<RangedAudioParameter>> params;
+
+    params.push_back(std::make_unique<AudioParameterChoice>(
+        "mode",
+        "Mode",
+        StringArray
+        {
+            "Off",
+            "Reference",
+            "Auto",
+            "Immersive",
+            "Movie",
+            "Music",
+            "Game",
+            "Voice",
+            "Night",
+            "Bass+",
+            "IEM Safe",
+            "Aux Line"
+        },
+        3
+    ));
+
+    params.push_back(std::make_unique<AudioParameterChoice>(
+        "output",
+        "Output Target",
+        StringArray
+        {
+            "Headphones",
+            "IEM",
+            "Line / Aux",
+            "Car"
+        },
+        0
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "intensity",
+        "Intensity",
+        NormalisableRange<float>(0.0f, 100.0f, 1.0f),
+        70.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "bass",
+        "Bass",
+        NormalisableRange<float>(-6.0f, 6.0f, 0.1f),
+        0.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "bright",
+        "Brightness",
+        NormalisableRange<float>(-6.0f, 6.0f, 0.1f),
+        0.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "dialogue",
+        "Dialogue",
+        NormalisableRange<float>(0.0f, 6.0f, 0.1f),
+        0.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "crossfeed",
+        "Crossfeed",
+        NormalisableRange<float>(0.0f, 100.0f, 1.0f),
+        60.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "outgain",
+        "Output Gain",
+        NormalisableRange<float>(-12.0f, 6.0f, 0.1f),
+        0.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "ceiling",
+        "Limiter Ceiling",
+        NormalisableRange<float>(-3.0f, -0.1f, 0.1f),
+        -1.0f
+    ));
+
+    return { params.begin(), params.end() };
+}
+
+//==============================================================================
+
+ImmersiveAUAudioProcessor::ImmersiveAUAudioProcessor()
+    : AudioProcessor(BusesProperties()
+                     .withInput("Input", AudioChannelSet::stereo(), true)
+                     .withOutput("Output", AudioChannelSet::stereo(), true)),
+      parameters(*this, nullptr, juce::Identifier("PARAMS"), createParameterLayout())
+{
+    dsp = std::make_unique<DSP>();
+
+    modeParam       = parameters.getRawParameterValue("mode");
+    outputParam     = parameters.getRawParameterValue("output");
+    intensityParam  = parameters.getRawParameterValue("intensity");
+    bassParam       = parameters.getRawParameterValue("bass");
+    brightParam     = parameters.getRawParameterValue("bright");
+    dialogueParam   = parameters.getRawParameterValue("dialogue");
+    crossfeedParam  = parameters.getRawParameterValue("crossfeed");
+    outputGainParam = parameters.getRawParameterValue("outgain");
+    ceilingParam    = parameters.getRawParameterValue("ceiling");
+}
+
+ImmersiveAUAudioProcessor::~ImmersiveAUAudioProcessor()
+{
+}
+
+//==============================================================================
+
+const juce::String ImmersiveAUAudioProcessor::getName() const
+{
+    return JucePlugin_Name;
+}
+
+bool ImmersiveAUAudioProcessor::acceptsMidi() const
+{
+    return false;
+}
+
+bool ImmersiveAUAudioProcessor::producesMidi() const
+{
+    return false;
+}
+
+bool ImmersiveAUAudioProcessor::isMidiEffect() const
+{
+    return false;
+}
+
+double ImmersiveAUAudioProcessor::getTailLengthSeconds() const
+{
+    return 2.0;
+}
+
+int ImmersiveAUAudioProcessor::getNumPrograms()
+{
+    return 1;
+}
+
+int ImmersiveAUAudioProcessor::getCurrentProgram()
+{
+    return 0;
+}
+
+void ImmersiveAUAudioProcessor::setCurrentProgram(int)
+{
+}
+
+const juce::String ImmersiveAUAudioProcessor::getProgramName(int)
+{
+    return {};
+}
+
+void ImmersiveAUAudioProcessor::changeProgramName(int, const juce::String&)
+{
+}
+
+//==============================================================================
+
+void ImmersiveAUAudioProcessor::prepareToPlay(double sampleRate, int)
+{
+    dsp->prepare(sampleRate);
+}
+
+void ImmersiveAUAudioProcessor::releaseResources()
+{
+    dsp->reset();
+}
+
+bool ImmersiveAUAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
+{
+    if (layouts.getMainInputChannelSet() != AudioChannelSet::stereo())
+        return false;
+
+    if (layouts.getMainOutputChannelSet() != AudioChannelSet::stereo())
+        return false;
+
+    return true;
+}
+
+//==============================================================================
+
+void ImmersiveAUAudioProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer&)
+{
+    ScopedNoDenormals noDenormals;
+
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
+
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear(i, 0, buffer.getNumSamples());
+
+    if (modeParam == nullptr)
+        return;
+
+    const int mode = (int) modeParam->load();
+
+    // True bypass.
+    if (mode == 0)
+        return;
+
+    if (buffer.getNumChannels() < 2)
+        return;
+
+    const int outputTarget = (int) outputParam->load();
+
+    PresetValues preset = getPreset(mode);
+
+    float intensity = intensityParam->load() / 70.0f;
+    intensity = jlimit(0.0f, 1.5f, intensity);
+
+    float width = 100.0f + (preset.width - 100.0f) * intensity;
+    float height = preset.height * intensity;
+    float reverb = preset.reverb * intensity;
+
+    float bassDb = preset.bass + bassParam->load();
+    float brightDb = preset.bright + brightParam->load();
+    float dialogueDb = preset.dialogue + dialogueParam->load();
+
+    float crossfeedAmount = preset.crossfeed * (crossfeedParam->load() / 60.0f);
+    float ceilingDb = jmin(ceilingParam->load(), preset.ceiling);
+
+    // Output target tuning.
+    if (outputTarget == 1) // IEM
+    {
+        crossfeedAmount = jmin(100.0f, crossfeedAmount + 15.0f);
+        brightDb -= 1.0f;
+        ceilingDb = jmin(ceilingDb, -2.0f);
+        height *= 0.90f;
+    }
+    else if (outputTarget == 2) // Line / Aux
+    {
+        crossfeedAmount = 0.0f;
+        height *= 0.15f;
+        reverb *= 0.50f;
+    }
+    else if (outputTarget == 3) // Car
+    {
+        crossfeedAmount = 0.0f;
+        height = 0.0f;
+        reverb *= 0.30f;
+        dialogueDb += 1.0f;
+        bassDb += 1.0f;
+    }
+
+    width = jlimit(0.0f, 150.0f, width);
+    height = jlimit(0.0f, 100.0f, height);
+    reverb = jlimit(0.0f, 100.0f, reverb);
+    crossfeedAmount = jlimit(0.0f, 100.0f, crossfeedAmount);
+
+    RenderSettings settings;
+
+    settings.bypass = preset.bypass;
+
+    settings.widthLinear = jlimit(0.0f, 1.5f, width / 100.0f);
+    settings.heightGain = (height / 100.0f) * 0.35f;
+    settings.reverbMix = (reverb / 100.0f) * 0.30f;
+    settings.crossfeedGain = (crossfeedAmount / 100.0f) * 0.70f;
+
+    settings.bassDb = bassDb;
+    settings.brightDb = brightDb;
+    settings.dialogueDb = dialogueDb;
+
+    settings.outputGain = (float) Decibels::decibelsToGain(outputGainParam->load());
+    settings.ceilingDb = jlimit(-3.0f, -0.1f, ceilingDb);
+
+    dsp->update(settings);
+
+    float* l = buffer.getWritePointer(0);
+    float* r = buffer.getWritePointer(1);
+
+    for (int n = 0; n < buffer.getNumSamples(); ++n)
+        dsp->processSample(l[n], r[n]);
+}
+
+//==============================================================================
+
+bool ImmersiveAUAudioProcessor::hasEditor() const
+{
+    return true;
+}
+
+juce::AudioProcessorEditor* ImmersiveAUAudioProcessor::createEditor()
+{
+    return new juce::GenericAudioProcessorEditor(*this);
+}
+
+//==============================================================================
+
+void ImmersiveAUAudioProcessor::getStateInformation(MemoryBlock& destData)
+{
+    auto state = parameters.copyState();
+
+    std::unique_ptr<XmlElement> xml(state.createXml());
+
+    if (xml != nullptr)
+        copyXmlToBinary(*xml, destData);
+}
+
+void ImmersiveAUAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
+{
+    std::unique_ptr<XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
+
+    if (xml != nullptr)
+        parameters.replaceState(ValueTree::fromXml(*xml));
+}
+
+//==============================================================================
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new ImmersiveAUAudioProcessor();
+}
+```
+
+Save.
+
+---
+
+# 5. Build it
+
+From the `ImmersiveAU` folder:
+
+```bash
+cmake -B build -G Xcode
+cmake --build build --config Release
+```
+
+This may take a few minutes the first time because it builds JUCE.
+
+---
+
+# 6. Install the AU for SoundSource
+
+Run:
+
+```bash
+mkdir -p ~/Library/Audio/Plug-Ins/Components
+rm -rf ~/Library/Audio/Plug-Ins/Components/ImmersiveAU.component
+cp -R build/ImmersiveAU_artefacts/Release/AU/ImmersiveAU.component ~/Library/Audio/Plug-Ins/Components/
+codesign --force --deep --sign - ~/Library/Audio/Plug-Ins/Components/ImmersiveAU.component
+```
+
+Then restart SoundSource.
+
+If SoundSource does not see it immediately, restart your Mac once.
+
+---
+
+# 7. Test it
+
+You can test the standalone version first:
+
+```bash
+open build/ImmersiveAU_artefacts/Release/Standalone/ImmersiveAU.app
+```
+
+Then in SoundSource:
+
+1. Open SoundSource.
+2. Add an Audio Unit effect.
+3. Choose **ImmersiveAU**.
+4. Try modes:
+   - Immersive
+   - Movie
+   - Music
+   - Game
+   - Voice
+   - IEM Safe
+5. Set **Output Target**:
+   - Headphones
+   - IEM
+   - Line / Aux
+   - Car
+
+---
+
+# 8. What you now have
+
+This AU currently includes:
+
+## Modes
+
+- Off
+- Reference
+- Auto
+- Immersive
+- Movie
+- Music
+- Game
+- Voice
+- Night
+- Bass+
+- IEM Safe
+- Aux Line
+
+## Output target tunings
+
+- Headphones
+- IEM
+- Line / Aux
+- Car
+
+## DSP features
+
+- Mid/side width engine
+- Height/air bus
+- Small FDN reverb for envelopment
+- Crossfeed
+- Bass shelf
+- Dialogue presence boost
+- Brightness shelf
+- Output gain
+- Safety limiter
+- IEM-safe ceiling behavior
+- Line/Aux-safe behavior
+
+This is the **MVP shell**.
+
+---
+
+# 9. Important note
+
+This is **not yet the full Atmos-like object/HRTF engine** we designed earlier.
+
+It is the **buildable AU foundation**.
+
+The next upgrade is to replace the current `DSP` struct with the full engine:
+
+- 7.1.4 virtual bed
+- true ITD/ILD HRTF panner
+- pinna elevation filters
+- early reflections
+- better FDN room
+- object accents
+- bass management
+- loudness normalization
+- true-peak limiter
+- custom UI
+
+But now you have a real plugin compiling and installing.
+
+---
+
+# 10. If you want, next I can generate the next upgrade
+
+I can give you the next drop-in replacement file:
+
+```text
+Source/AtmosCore.h
+Source/AtmosCore.cpp
+```
+
+That will replace the simple MVP engine with the much more realistic:
+
+- 7.1.4 bed renderer
+- HRTF ITD/ILD
+- elevation notches
+- object spread
+- early reflections
+- improved FDN
+- bass management
+- dialogue ducking
+
+If you want, reply:
+
+```text
+Generate the full HRTF object engine
+```
+
+and I’ll give you the next source files to drop into this same project.
+
+### USER
+next
+
+### ASSISTANT
+Below is the **next upgrade**: a more **Atmos-like spatial engine** you can drop into the same project.
+
+This replaces the simple MVP engine with a much more capable one:
+
+- 11-channel virtual bed:
+  - L / R
+  - Center
+  - Left / Right surround
+  - Left / Right rear
+  - Left / Right front height
+  - Left / Right rear height
+- Parametric HRTF panner:
+  - ITD delay
+  - ILD cues
+  - pinna elevation notch
+  - distance / air cues
+- Decorrelated surrounds
+- Height buses
+- FDN room reverb
+- Output-target tuning
+- Mode-based spatial presets
+
+This is still **not a licensed Dolby Atmos renderer**, but it is much closer to the “Atmos-inspired” target.
+
+---
+
+# 1. Add a new file
+
+Create:
+
+```bash
+cd ImmersiveAU
+nano Source/SpatialEngine.h
+```
+
+Paste this entire file:
+
+```cpp
+#pragma once
+
+#include <JuceHeader.h>
+
+#include <cmath>
+#include <vector>
+#include <algorithm>
+
+using namespace juce;
+
+static constexpr float kPi = 3.14159265358979323846f;
+
+//==============================================================================
+// Basic DSP building blocks
+//==============================================================================
+
+struct Biquad
+{
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+    float x1[2] = {0.0f, 0.0f}, x2[2] = {0.0f, 0.0f};
+    float y1[2] = {0.0f, 0.0f}, y2[2] = {0.0f, 0.0f};
+
+    void reset()
+    {
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            x1[ch] = x2[ch] = y1[ch] = y2[ch] = 0.0f;
+        }
+    }
+
+    void setCoefficients(float B0, float B1, float B2, float A1, float A2)
+    {
+        b0 = B0;
+        b1 = B1;
+        b2 = B2;
+        a1 = A1;
+        a2 = A2;
+    }
+
+    float process(float x, int ch)
+    {
+        float y = b0 * x + b1 * x1[ch] + b2 * x2[ch] - a1 * y1[ch] - a2 * y2[ch];
+
+        x2[ch] = x1[ch];
+        x1[ch] = x;
+
+        y2[ch] = y1[ch];
+        y1[ch] = y;
+
+        return y;
+    }
+
+    void setHighPass(double sr, float freq, float q = 0.707f)
+    {
+        freq = jlimit(20.0f, (float) sr * 0.499f, freq);
+
+        float w0 = 2.0f * kPi * freq / (float) sr;
+        float cosw = std::cos(w0);
+        float sinw = std::sin(w0);
+        float alpha = sinw / (2.0f * q);
+
+        float a0 = 1.0f + alpha;
+
+        setCoefficients(((1.0f + cosw) * 0.5f) / a0,
+                        (-(1.0f + cosw)) / a0,
+                        ((1.0f + cosw) * 0.5f) / a0,
+                        (-2.0f * cosw) / a0,
+                        (1.0f - alpha) / a0);
+    }
+
+    void setLowPass(double sr, float freq, float q = 0.707f)
+    {
+        freq = jlimit(20.0f, (float) sr * 0.499f, freq);
+
+        float w0 = 2.0f * kPi * freq / (float) sr;
+        float cosw = std::cos(w0);
+        float sinw = std::sin(w0);
+        float alpha = sinw / (2.0f * q);
+
+        float a0 = 1.0f + alpha;
+
+        setCoefficients(((1.0f - cosw) * 0.5f) / a0,
+                        ((1.0f - cosw)) / a0,
+                        ((1.0f - cosw) * 0.5f) / a0,
+                        (-2.0f * cosw) / a0,
+                        (1.0f - alpha) / a0);
+    }
+
+    void setLowShelf(double sr, float freq, float gainDb)
+    {
+        if (std::abs(gainDb) < 0.01f)
+        {
+            setCoefficients(1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            return;
+        }
+
+        freq = jlimit(20.0f, (float) sr * 0.499f, freq);
+
+        float A = std::pow(10.0f, gainDb / 40.0f);
+        float w0 = 2.0f * kPi * freq / (float) sr;
+        float cosw = std::cos(w0);
+        float sinw = std::sin(w0);
+
+        float alpha = sinw * 0.5f * std::sqrt(2.0f);
+        float sq = 2.0f * std::sqrt(A) * alpha;
+
+        float b0 = A * ((A + 1.0f) - (A - 1.0f) * cosw + sq);
+        float b1 = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cosw);
+        float b2 = A * ((A + 1.0f) - (A - 1.0f) * cosw - sq);
+
+        float a0 = (A + 1.0f) + (A - 1.0f) * cosw + sq;
+        float a1 = -2.0f * ((A - 1.0f) + (A + 1.0f) * cosw);
+        float a2 = (A + 1.0f) + (A - 1.0f) * cosw - sq;
+
+        setCoefficients(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+    }
+
+    void setHighShelf(double sr, float freq, float gainDb)
+    {
+        if (std::abs(gainDb) < 0.01f)
+        {
+            setCoefficients(1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            return;
+        }
+
+        freq = jlimit(20.0f, (float) sr * 0.499f, freq);
+
+        float A = std::pow(10.0f, gainDb / 40.0f);
+        float w0 = 2.0f * kPi * freq / (float) sr;
+        float cosw = std::cos(w0);
+        float sinw = std::sin(w0);
+
+        float alpha = sinw * 0.5f * std::sqrt(2.0f);
+        float sq = 2.0f * std::sqrt(A) * alpha;
+
+        float b0 = A * ((A + 1.0f) + (A - 1.0f) * cosw + sq);
+        float b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cosw);
+        float b2 = A * ((A + 1.0f) + (A - 1.0f) * cosw - sq);
+
+        float a0 = (A + 1.0f) - (A - 1.0f) * cosw + sq;
+        float a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cosw);
+        float a2 = (A + 1.0f) - (A - 1.0f) * cosw - sq;
+
+        setCoefficients(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+    }
+
+    void setPeaking(double sr, float freq, float gainDb, float q)
+    {
+        if (std::abs(gainDb) < 0.01f)
+        {
+            setCoefficients(1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            return;
+        }
+
+        freq = jlimit(20.0f, (float) sr * 0.499f, freq);
+
+        float A = std::pow(10.0f, gainDb / 40.0f);
+        float w0 = 2.0f * kPi * freq / (float) sr;
+        float cosw = std::cos(w0);
+        float sinw = std::sin(w0);
+        float alpha = sinw / (2.0f * q);
+
+        float b0 = 1.0f + alpha * A;
+        float b1 = -2.0f * cosw;
+        float b2 = 1.0f - alpha * A;
+
+        float a0 = 1.0f + alpha / A;
+        float a1 = -2.0f * cosw;
+        float a2 = 1.0f - alpha / A;
+
+        setCoefficients(b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+    }
+};
+
+//==============================================================================
+
+struct OnePoleLP
+{
+    float a = 0.0f;
+    float y[2] = {0.0f, 0.0f};
+
+    void reset()
+    {
+        y[0] = y[1] = 0.0f;
+    }
+
+    void setCutoff(double sr, float freq)
+    {
+        if (sr <= 0.0)
+            return;
+
+        freq = jlimit(20.0f, (float) sr * 0.49f, freq);
+        a = 1.0f - std::exp(-2.0f * kPi * freq / (float) sr);
+    }
+
+    float process(float x, int ch)
+    {
+        y[ch] += a * (x - y[ch]);
+        return y[ch];
+    }
+};
+
+//==============================================================================
+
+struct DelayLine
+{
+    std::vector<float> buffer;
+    int write = 0;
+    int delaySamples = 0;
+
+    void prepare(int maxDelaySamples)
+    {
+        maxDelaySamples = std::max(1, maxDelaySamples);
+        buffer.assign((size_t) maxDelaySamples + 1, 0.0f);
+        write = 0;
+        delaySamples = 0;
+    }
+
+    void reset()
+    {
+        std::fill(buffer.begin(), buffer.end(), 0.0f);
+        write = 0;
+    }
+
+    void setDelaySamples(int d)
+    {
+        if (buffer.empty())
+            return;
+
+        delaySamples = jlimit(0, (int) buffer.size() - 1, d);
+    }
+
+    void push(float x)
+    {
+        if (buffer.empty())
+            return;
+
+        buffer[(size_t) write] = x;
+
+        if (++write >= (int) buffer.size())
+            write = 0;
+    }
+
+    float read() const
+    {
+        return read(delaySamples);
+    }
+
+    float read(int d) const
+    {
+        if (buffer.empty())
+            return 0.0f;
+
+        d = jlimit(0, (int) buffer.size() - 1, d);
+
+        int idx = write - 1 - d;
+
+        if (idx < 0)
+            idx += (int) buffer.size();
+
+        return buffer[(size_t) idx];
+    }
+};
+
+//==============================================================================
+
+struct FractionalDelay
+{
+    std::vector<float> buffer;
+    int write = 0;
+    float delaySamples = 0.0f;
+    int maxSamples = 0;
+    double sampleRate = 48000.0;
+
+    void prepare(float maxSeconds, double sr)
+    {
+        sampleRate = sr;
+        maxSamples = std::max(1, (int) (maxSeconds * sampleRate) + 4);
+        buffer.assign((size_t) maxSamples + 1, 0.0f);
+        write = 0;
+        delaySamples = 0.0f;
+    }
+
+    void reset()
+    {
+        std::fill(buffer.begin(), buffer.end(), 0.0f);
+        write = 0;
+        delaySamples = 0.0f;
+    }
+
+    void setDelaySeconds(float seconds)
+    {
+        float maxDelay = (float) std::max(0, maxSamples - 1);
+        delaySamples = jlimit(0.0f, maxDelay, seconds * (float) sampleRate);
+    }
+
+    float process(float x)
+    {
+        if (buffer.empty())
+            return x;
+
+        buffer[(size_t) write] = x;
+
+        float readPos = (float) write - delaySamples;
+        float size = (float) buffer.size();
+
+        while (readPos < 0.0f)
+            readPos += size;
+
+        int i0 = (int) std::floor(readPos);
+        float frac = readPos - (float) i0;
+
+        int i1 = (i0 + 1) % (int) buffer.size();
+
+        float y = buffer[(size_t) i0] * (1.0f - frac)
+                + buffer[(size_t) i1] * frac;
+
+        if (++write >= (int) buffer.size())
+            write = 0;
+
+        return y;
+    }
+};
+
+//==============================================================================
+
+struct Allpass
+{
+    DelayLine delay;
+    float g = 0.5f;
+
+    void reset()
+    {
+        delay.reset();
+    }
+
+    void prepare(int maxDelaySamples, int delaySamples, float coeff)
+    {
+        delay.prepare(maxDelaySamples);
+        delay.setDelaySamples(delaySamples);
+        g = coeff;
+    }
+
+    float process(float x)
+    {
+        float delayed = delay.read();
+        float y = delayed - g * x;
+        delay.push(x + g * y);
+        return y;
+    }
+};
+
+//==============================================================================
+
+struct Decorrelator
+{
+    Allpass a1;
+    Allpass a2;
+    DelayLine delay;
+    Biquad hp;
+    float gain = 0.7f;
+
+    void reset()
+    {
+        a1.reset();
+        a2.reset();
+        delay.reset();
+        hp.reset();
+    }
+
+    void prepare(double sr, int ap1Samples, int ap2Samples, int delayMs, float g)
+    {
+        reset();
+
+        hp.setHighPass(sr, 250.0f);
+
+        a1.prepare(ap1Samples + 10, ap1Samples, 0.45f);
+        a2.prepare(ap2Samples + 10, ap2Samples, 0.35f);
+
+        int maxDelay = (int) (sr * 0.10) + 100;
+        int delaySamples = (int) (sr * (double) delayMs / 1000.0);
+
+        delay.prepare(maxDelay);
+        delay.setDelaySamples(delaySamples);
+
+        gain = g;
+    }
+
+    float process(float x)
+    {
+        x = hp.process(x, 0);
+        x = a1.process(x);
+        x = a2.process(x);
+
+        delay.push(x);
+
+        return delay.read() * gain;
+    }
+};
+
+//==============================================================================
+
+struct CenterExtract
+{
+    Biquad hp;
+    Biquad lp;
+
+    void reset()
+    {
+        hp.reset();
+        lp.reset();
+    }
+
+    void prepare(double sr)
+    {
+        reset();
+
+        hp.setHighPass(sr, 200.0f);
+        lp.setLowPass(sr, 4000.0f);
+    }
+
+    float process(float x)
+    {
+        x = hp.process(x, 0);
+        x = lp.process(x, 0);
+        return x;
+    }
+};
+
+//==============================================================================
+
+struct HeightBus
+{
+    Biquad hp;
+    Biquad notch;
+    Biquad shelf;
+
+    DelayLine delayL;
+    DelayLine delayR;
+
+    int dL = 0;
+    int dR = 0;
+
+    void reset()
+    {
+        hp.reset();
+        notch.reset();
+        shelf.reset();
+        delayL.reset();
+        delayR.reset();
+    }
+
+    void prepare(double sr, int delayLms, int delayRms, float notchHz, float shelfGainDb)
+    {
+        reset();
+
+        hp.setHighPass(sr, 500.0f);
+        notch.setPeaking(sr, notchHz, -4.0f, 8.0f);
+        shelf.setHighShelf(sr, 9000.0f, shelfGainDb);
+
+        int maxDelay = (int) (sr * 0.08) + 100;
+
+        delayL.prepare(maxDelay);
+        delayR.prepare(maxDelay);
+
+        dL = (int) (sr * (double) delayLms / 1000.0);
+        dR = (int) (sr * (double) delayRms / 1000.0);
+
+        delayL.setDelaySamples(dL);
+        delayR.setDelaySamples(dR);
+    }
+
+    void process(float input, float& outL, float& outR)
+    {
+        float x = hp.process(input, 0);
+
+        delayL.push(x);
+        delayR.push(x);
+
+        float l = delayL.read();
+        float r = delayR.read();
+
+        l = notch.process(l, 0);
+        r = notch.process(r, 1);
+
+        l = shelf.process(l, 0);
+        r = shelf.process(r, 1);
+
+        outL = l;
+        outR = r;
+    }
+};
+
+//==============================================================================
+
+struct FDNReverb
+{
+    DelayLine lines[4];
+    OnePoleLP damp[4];
+
+    int delaySamples[4] = {0, 0, 0, 0};
+
+    float feedback = 0.70f;
+
+    float inputGain[4] =
+    {
+        0.55f, 0.45f, 0.45f, 0.55f
+    };
+
+    float outGainL[4] =
+    {
+        0.55f, -0.45f, 0.35f, -0.35f
+    };
+
+    float outGainR[4] =
+    {
+        0.55f, 0.45f, -0.35f, -0.35f
+    };
+
+    void reset()
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            lines[i].reset();
+            damp[i].reset();
+        }
+    }
+
+    void prepare(double sr)
+    {
+        reset();
+
+        int maxDelay = (int) (sr * 0.20) + 100;
+
+        static const int base[4] =
+        {
+            1409, 1783, 2003, 2269
+        };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            lines[i].prepare(maxDelay);
+
+            int d = (int) ((double) base[i] * sr / 48000.0);
+            d = jlimit(1, maxDelay, d);
+
+            lines[i].setDelaySamples(d);
+            delaySamples[i] = d;
+
+            damp[i].setCutoff(sr, 3500.0f);
+        }
+    }
+
+    void setParams(float amount, float roomSize, double sr)
+    {
+        amount = jlimit(0.0f, 1.0f, amount);
+        roomSize = jlimit(0.0f, 1.0f, roomSize);
+
+        feedback = jlimit(0.45f, 0.94f, 0.52f + 0.32f * amount + 0.10f * roomSize);
+
+        float dampFreq = 5500.0f - 2500.0f * amount - 500.0f * roomSize;
+        dampFreq = jlimit(500.0f, 8000.0f, dampFreq);
+
+        for (int i = 0; i < 4; ++i)
+            damp[i].setCutoff(sr, dampFreq);
+    }
+
+    void process(float input, float& outL, float& outR)
+    {
+        float out[4];
+        float v[4];
+        float sumV = 0.0f;
+
+        for (int i = 0; i < 4; ++i)
+        {
+            out[i] = lines[i].read();
+            v[i] = out[i] + input * inputGain[i];
+            sumV += v[i];
+        }
+
+        float l = 0.0f;
+        float r = 0.0f;
+
+        for (int i = 0; i < 4; ++i)
+        {
+            float y = v[i] - 0.5f * sumV;
+
+            y = damp[i].process(y, 0);
+            y *= feedback;
+
+            lines[i].push(y);
+
+            l += out[i] * outGainL[i];
+            r += out[i] * outGainR[i];
+        }
+
+        outL = l * 0.40f;
+        outR = r * 0.40f;
+    }
+};
+
+//==============================================================================
+
+struct Limiter
+{
+    double sampleRate = 48000.0;
+
+    std::vector<float> bufL;
+    std::vector<float> bufR;
+
+    int write = 0;
+    int delaySamples = 0;
+
+    float gain = 1.0f;
+    float threshold = 0.891f;
+
+    float attackCoeff = 0.1f;
+    float releaseCoeff = 0.001f;
+
+    void reset()
+    {
+        std::fill(bufL.begin(), bufL.end(), 0.0f);
+        std::fill(bufR.begin(), bufR.end(), 0.0f);
+        write = 0;
+        gain = 1.0f;
+    }
+
+    void prepare(double sr)
+    {
+        sampleRate = sr;
+
+        delaySamples = std::max(1, (int) (sr * 0.005));
+
+        bufL.assign((size_t) delaySamples + 1, 0.0f);
+        bufR.assign((size_t) delaySamples + 1, 0.0f);
+
+        attackCoeff = (float) (1.0 - std::exp(-1.0 / (sampleRate * 0.001)));
+        releaseCoeff = (float) (1.0 - std::exp(-1.0 / (sampleRate * 0.100)));
+
+        reset();
+    }
+
+    void setThresholdDb(float db)
+    {
+        threshold = std::max(0.001f, (float) Decibels::decibelsToGain(db));
+    }
+
+    void process(float& l, float& r)
+    {
+        if (bufL.empty() || bufR.empty())
+            return;
+
+        bufL[(size_t) write] = l;
+        bufR[(size_t) write] = r;
+
+        int readIdx = write - delaySamples;
+
+        if (readIdx < 0)
+            readIdx += (int) bufL.size();
+
+        float delayedL = bufL[(size_t) readIdx];
+        float delayedR = bufR[(size_t) readIdx];
+
+        if (++write >= (int) bufL.size())
+            write = 0;
+
+        float peak = std::max(std::abs(delayedL), std::abs(delayedR));
+
+        float target = 1.0f;
+
+        if (peak > threshold && peak > 0.000001f)
+            target = threshold / peak;
+
+        target = std::min(1.0f, target);
+
+        float coeff = (target < gain) ? attackCoeff : releaseCoeff;
+        gain += coeff * (target - gain);
+
+        l = delayedL * gain;
+        r = delayedR * gain;
+    }
+};
+
+//==============================================================================
+
+struct RenderSettings
+{
+    bool bypass = true;
+
+    float widthLinear = 1.0f;
+
+    float centerGain = 1.0f;
+    float surroundGain = 0.0f;
+    float rearGain = 0.0f;
+
+    float heightFrontGain = 0.0f;
+    float heightRearGain = 0.0f;
+
+    float reverbMix = 0.0f;
+    float crossfeedGain = 0.0f;
+    float outputGain = 1.0f;
+
+    float bassDb = 0.0f;
+    float brightDb = 0.0f;
+    float dialogueDb = 0.0f;
+
+    float ceilingDb = -1.0f;
+
+    float hrtfStrength = 0.0f;
+    float roomSize = 0.5f;
+};
+
+//==============================================================================
+
+struct HrtfPanner
+{
+    double sampleRate = 48000.0;
+
+    FractionalDelay delayL;
+    FractionalDelay delayR;
+
+    Biquad air;
+    Biquad ildL;
+    Biquad ildR;
+    Biquad pinnaL;
+    Biquad pinnaR;
+
+    float gain = 1.0f;
+
+    float az = 0.0f;
+    float el = 0.0f;
+    float dist = 1.5f;
+
+    float distanceGain = 1.0f;
+
+    void reset()
+    {
+        delayL.reset();
+        delayR.reset();
+
+        air.reset();
+        ildL.reset();
+        ildR.reset();
+        pinnaL.reset();
+        pinnaR.reset();
+    }
+
+    void prepare(double sr)
+    {
+        sampleRate = sr;
+
+        reset();
+
+        delayL.prepare(0.002f, sr);
+        delayR.prepare(0.002f, sr);
+
+        air.setLowPass(sampleRate, 18000.0f);
+
+        ildL.setHighShelf(sampleRate, 1500.0f, 0.0f);
+        ildR.setHighShelf(sampleRate, 1500.0f, 0.0f);
+
+        pinnaL.setPeaking(sampleRate, 6500.0f, 0.0f, 8.0f);
+        pinnaR.setPeaking(sampleRate, 6500.0f, 0.0f, 8.0f);
+    }
+
+    void setPosition(float azDeg, float elDeg, float distance)
+    {
+        az = azDeg;
+        el = elDeg;
+        dist = distance;
+
+        update();
+    }
+
+    void update()
+    {
+        if (sampleRate <= 0.0)
+            return;
+
+        float azRad = az * kPi / 180.0f;
+
+        float effective = jlimit(-kPi * 0.5f, kPi * 0.5f, azRad);
+
+        // Woodworth-style ITD approximation.
+        float itd = (0.0875f / 343.0f) * (effective + std::sin(effective));
+
+        if (az >= 0.0f)
+        {
+            delayL.setDelaySeconds(itd);
+            delayR.setDelaySeconds(0.0f);
+        }
+        else
+        {
+            delayL.setDelaySeconds(0.0f);
+            delayR.setDelaySeconds(-itd);
+        }
+
+        float sinAz = std::sin(azRad);
+        float ild = 15.0f * sinAz * sinAz;
+
+        float ildLDb = 0.0f;
+        float ildRDb = 0.0f;
+
+        if (az >= 0.0f)
+        {
+            ildLDb = -0.70f * ild;
+            ildRDb =  0.30f * ild;
+        }
+        else
+        {
+            ildLDb =  0.30f * ild;
+            ildRDb = -0.70f * ild;
+        }
+
+        bool rear = std::abs(az) > 90.0f;
+
+        if (rear)
+        {
+            ildLDb -= 1.5f;
+            ildRDb -= 1.5f;
+        }
+
+        ildL.setHighShelf(sampleRate, 1500.0f, ildLDb);
+        ildR.setHighShelf(sampleRate, 1500.0f, ildRDb);
+
+        float notchHz = 6000.0f + el * 35.0f;
+        notchHz = jlimit(3000.0f, 12000.0f, notchHz);
+
+        float notchGain = -3.0f - 0.04f * std::abs(el);
+        notchGain = jlimit(-8.0f, -1.0f, notchGain);
+
+        pinnaL.setPeaking(sampleRate, notchHz, notchGain, 8.0f);
+        pinnaR.setPeaking(sampleRate, notchHz, notchGain, 8.0f);
+
+        float d = std::max(0.5f, dist);
+        distanceGain = 1.0f / (1.0f + 0.25f * (d - 1.0f));
+        distanceGain = jlimit(0.5f, 1.2f, distanceGain);
+
+        float airFreq = 20000.0f / (1.0f + 0.12f * dist);
+
+        if (rear)
+            airFreq *= 0.80f;
+
+        airFreq = jlimit(1000.0f, 19000.0f, airFreq);
+
+        air.setLowPass(sampleRate, airFreq);
+    }
+
+    void process(float x, float& outL, float& outR)
+    {
+        float y = x * gain * distanceGain;
+
+        y = air.process(y, 0);
+
+        float l = delayL.process(y);
+        float r = delayR.process(y);
+
+        l = ildL.process(l, 0);
+        r = ildR.process(r, 0);
+
+        l = pinnaL.process(l, 0);
+        r = pinnaR.process(r, 0);
+
+        outL += l;
+        outR += r;
+    }
+};
+
+//==============================================================================
+
+struct SpatialEngine
+{
+    double sampleRate = 48000.0;
+
+    Biquad hp;
+    Biquad lowShelf;
+    Biquad midPeak;
+    Biquad highShelf;
+
+    OnePoleLP crossLP;
+
+    CenterExtract center;
+
+    Decorrelator surL;
+    Decorrelator surR;
+    Decorrelator rearL;
+    Decorrelator rearR;
+
+    HeightBus heightFront;
+    HeightBus heightRear;
+
+    FDNReverb reverb;
+    Limiter limiter;
+
+    HrtfPanner panners[11];
+
+    float bedGain[11] =
+    {
+        1.0f, 1.0f, 1.0f,
+        0.0f, 0.0f,
+        0.0f, 0.0f,
+        0.0f, 0.0f,
+        0.0f, 0.0f
+    };
+
+    RenderSettings settings;
+
+    void reset()
+    {
+        hp.reset();
+        lowShelf.reset();
+        midPeak.reset();
+        highShelf.reset();
+
+        crossLP.reset();
+
+        center.reset();
+
+        surL.reset();
+        surR.reset();
+        rearL.reset();
+        rearR.reset();
+
+        heightFront.reset();
+        heightRear.reset();
+
+        reverb.reset();
+        limiter.reset();
+
+        for (int i = 0; i < 11; ++i)
+            panners[i].reset();
+    }
+
+    void prepare(double sr)
+    {
+        sampleRate = sr;
+
+        reset();
+
+        hp.setHighPass(sr, 20.0f);
+        crossLP.setCutoff(sr, 700.0f);
+
+        center.prepare(sr);
+
+        auto scaleSamples = [&](int s)
+        {
+            return (int) ((double) s * sampleRate / 48000.0);
+        };
+
+        surL.prepare(sr, scaleSamples(157), scaleSamples(239), 14, 0.70f);
+        surR.prepare(sr, scaleSamples(197), scaleSamples(281), 17, 0.70f);
+
+        rearL.prepare(sr, scaleSamples(337), scaleSamples(461), 26, 0.60f);
+        rearR.prepare(sr, scaleSamples(397), scaleSamples(523), 31, 0.60f);
+
+        heightFront.prepare(sr, 18, 23, 6500.0f, 3.0f);
+        heightRear.prepare(sr, 27, 33, 7200.0f, 2.0f);
+
+        reverb.prepare(sr);
+        limiter.prepare(sr);
+
+        static const float positions[11][3] =
+        {
+            { -30.0f,   0.0f, 1.8f }, // L
+            {  30.0f,   0.0f, 1.8f }, // R
+            {   0.0f,   0.0f, 1.8f }, // C
+            {-100.0f,   0.0f, 1.5f }, // Lss
+            { 100.0f,   0.0f, 1.5f }, // Rss
+            {-140.0f,   0.0f, 1.6f }, // Lrs
+            { 140.0f,   0.0f, 1.6f }, // Rrs
+            { -45.0f,  35.0f, 2.0f }, // Ltf
+            {  45.0f,  35.0f, 2.0f }, // Rtf
+            {-135.0f,  30.0f, 2.0f }, // Ltb
+            { 135.0f,  30.0f, 2.0f }  // Rtb
+        };
+
+        for (int i = 0; i < 11; ++i)
+        {
+            panners[i].prepare(sr);
+            panners[i].setPosition(positions[i][0], positions[i][1], positions[i][2]);
+            panners[i].gain = 0.0f;
+        }
+    }
+
+    void update(const RenderSettings& s)
+    {
+        settings = s;
+
+        hp.setHighPass(sampleRate, 20.0f);
+
+        lowShelf.setLowShelf(sampleRate, 100.0f, settings.bassDb);
+        midPeak.setPeaking(sampleRate, 2500.0f, settings.dialogueDb, 1.0f);
+        highShelf.setHighShelf(sampleRate, 10000.0f, settings.brightDb);
+
+        crossLP.setCutoff(sampleRate, 700.0f);
+
+        reverb.setParams(settings.reverbMix, settings.roomSize, sampleRate);
+        limiter.setThresholdDb(settings.ceilingDb);
+
+        float master = 0.75f;
+
+        bedGain[0]  = 1.0f * master;
+        bedGain[1]  = 1.0f * master;
+        bedGain[2]  = settings.centerGain * master;
+
+        bedGain[3]  = settings.surroundGain * 0.90f * master;
+        bedGain[4]  = settings.surroundGain * 0.90f * master;
+
+        bedGain[5]  = settings.rearGain * 0.85f * master;
+        bedGain[6]  = settings.rearGain * 0.85f * master;
+
+        bedGain[7]  = settings.heightFrontGain * 0.80f * master;
+        bedGain[8]  = settings.heightFrontGain * 0.80f * master;
+
+        bedGain[9]  = settings.heightRearGain * 0.75f * master;
+        bedGain[10] = settings.heightRearGain * 0.75f * master;
+
+        for (int i = 0; i < 11; ++i)
+            panners[i].gain = bedGain[i];
+    }
+
+    void processSample(float& l, float& r)
+    {
+        if (settings.bypass)
+            return;
+
+        l = hp.process(l, 0);
+        r = hp.process(r, 1);
+
+        float m = 0.5f * (l + r);
+        float s = 0.5f * (l - r);
+
+        float centerRaw = center.process(m);
+        float centerSig = centerRaw * settings.centerGain;
+
+        float directL = l - 0.70f * centerRaw;
+        float directR = r - 0.70f * centerRaw;
+
+        float side = s * settings.widthLinear;
+
+        float surLSig = surL.process(side) * settings.surroundGain;
+        float surRSig = surR.process(side) * settings.surroundGain;
+
+        float rearLSig = rearL.process(side) * settings.rearGain;
+        float rearRSig = rearR.process(side) * settings.rearGain;
+
+        float heightIn = side * 0.65f + m * 0.35f;
+
+        float hfL = 0.0f, hfR = 0.0f;
+        float hrL = 0.0f, hrR = 0.0f;
+
+        heightFront.process(heightIn, hfL, hfR);
+        heightRear.process(heightIn, hrL, hrR);
+
+        hfL *= settings.heightFrontGain;
+        hfR *= settings.heightFrontGain;
+
+        hrL *= settings.heightRearGain;
+        hrR *= settings.heightRearGain;
+
+        float bed[11] =
+        {
+            directL,
+            directR,
+            centerSig,
+            surLSig,
+            surRSig,
+            rearLSig,
+            rearRSig,
+            hfL,
+            hfR,
+            hrL,
+            hrR
+        };
+
+        float spatL = 0.0f;
+        float spatR = 0.0f;
+
+        float h = jlimit(0.0f, 1.0f, settings.hrtfStrength);
+        float hMix = h * 0.85f;
+
+        if (hMix > 0.001f)
+        {
+            for (int i = 0; i < 11; ++i)
+                panners[i].process(bed[i], spatL, spatR);
+        }
+
+        float dryL = directL
+                   + centerSig * 0.90f
+                   + side * 0.25f
+                   + surLSig * 0.25f
+                   + hfL * 0.15f;
+
+        float dryR = directR
+                   + centerSig * 0.90f
+                   - side * 0.25f
+                   + surRSig * 0.25f
+                   + hfR * 0.15f;
+
+        float outL = dryL * (1.0f - hMix) + spatL * hMix;
+        float outR = dryR * (1.0f - hMix) + spatR * hMix;
+
+        float revIn = m * 0.55f
+                    + side * 0.30f
+                    + (hfL + hfR + hrL + hrR) * 0.10f;
+
+        float revL = 0.0f;
+        float revR = 0.0f;
+
+        reverb.process(revIn, revL, revR);
+
+        outL += revL * settings.reverbMix;
+        outR += revR * settings.reverbMix;
+
+        outL = lowShelf.process(outL, 0);
+        outR = lowShelf.process(outR, 1);
+
+        outL = midPeak.process(outL, 0);
+        outR = midPeak.process(outR, 1);
+
+        outL = highShelf.process(outL, 0);
+        outR = highShelf.process(outR, 1);
+
+        float lpL = crossLP.process(outL, 0);
+        float lpR = crossLP.process(outR, 1);
+
+        if (settings.crossfeedGain > 0.0001f)
+        {
+            float cf = settings.crossfeedGain;
+            float norm = 1.0f / (1.0f + cf);
+
+            float mixL = (outL + cf * lpR) * norm;
+            float mixR = (outR + cf * lpL) * norm;
+
+            outL = mixL;
+            outR = mixR;
+        }
+
+        outL *= settings.outputGain;
+        outR *= settings.outputGain;
+
+        limiter.process(outL, outR);
+
+        l = outL;
+        r = outR;
+    }
+};
+```
+
+Save.
+
+---
+
+# 2. Replace `Source/PluginProcessor.cpp`
+
+Now replace the old MVP processor implementation.
+
+Open:
+
+```bash
+nano Source/PluginProcessor.cpp
+```
+
+Delete everything and paste this new version:
+
+```cpp
+#include "PluginProcessor.h"
+#include "SpatialEngine.h"
+
+using namespace juce;
+
+//==============================================================================
+
+struct ImmersiveAUAudioProcessor::DSP
+{
+    SpatialEngine engine;
+
+    void prepare(double sr)
+    {
+        engine.prepare(sr);
+    }
+
+    void reset()
+    {
+        engine.reset();
+    }
+
+    void update(const RenderSettings& s)
+    {
+        engine.update(s);
+    }
+
+    void processSample(float& l, float& r)
+    {
+        engine.processSample(l, r);
+    }
+};
+
+//==============================================================================
+
+struct PresetValues
+{
+    bool bypass = false;
+
+    float width = 100.0f;
+    float center = 1.0f;
+
+    float surround = 0.0f;
+    float rear = 0.0f;
+
+    float heightFront = 0.0f;
+    float heightRear = 0.0f;
+
+    float reverb = 0.0f;
+    float crossfeed = 50.0f;
+
+    float bass = 0.0f;
+    float bright = 0.0f;
+    float dialogue = 0.0f;
+
+    float ceiling = -1.0f;
+
+    float hrtf = 0.0f;
+    float roomSize = 0.5f;
+};
+
+static PresetValues getPreset(int mode)
+{
+    PresetValues p;
+
+    switch (mode)
+    {
+        case 0: // Off
+            p.bypass = true;
+            p.hrtf = 0.0f;
+            return p;
+
+        case 1: // Reference
+            p.width = 100.0f;
+            p.center = 1.0f;
+            p.surround = 0.0f;
+            p.rear = 0.0f;
+            p.heightFront = 0.0f;
+            p.heightRear = 0.0f;
+            p.reverb = 0.0f;
+            p.crossfeed = 0.0f;
+            p.hrtf = 0.0f;
+            p.roomSize = 0.2f;
+            return p;
+
+        case 2: // Auto
+            p.width = 115.0f;
+            p.center = 1.10f;
+            p.surround = 0.45f;
+            p.rear = 0.30f;
+            p.heightFront = 0.35f;
+            p.heightRear = 0.20f;
+            p.reverb = 25.0f;
+            p.crossfeed = 60.0f;
+            p.bass = 1.0f;
+            p.bright = 1.0f;
+            p.dialogue = 1.0f;
+            p.hrtf = 0.75f;
+            p.roomSize = 0.45f;
+            return p;
+
+        case 3: // Immersive
+            p.width = 120.0f;
+            p.center = 1.10f;
+            p.surround = 0.50f;
+            p.rear = 0.35f;
+            p.heightFront = 0.45f;
+            p.heightRear = 0.25f;
+            p.reverb = 30.0f;
+            p.crossfeed = 60.0f;
+            p.bass = 2.0f;
+            p.bright = 1.0f;
+            p.dialogue = 2.0f;
+            p.hrtf = 0.85f;
+            p.roomSize = 0.50f;
+            return p;
+
+        case 4: // Movie
+            p.width = 130.0f;
+            p.center = 1.30f;
+            p.surround = 0.60f;
+            p.rear = 0.45f;
+            p.heightFront = 0.55f;
+            p.heightRear = 0.35f;
+            p.reverb = 40.0f;
+            p.crossfeed = 65.0f;
+            p.bass = 3.0f;
+            p.bright = 0.0f;
+            p.dialogue = 4.0f;
+            p.hrtf = 0.90f;
+            p.roomSize = 0.65f;
+            return p;
+
+        case 5: // Music
+            p.width = 110.0f;
+            p.center = 1.00f;
+            p.surround = 0.30f;
+            p.rear = 0.20f;
+            p.heightFront = 0.25f;
+            p.heightRear = 0.12f;
+            p.reverb = 20.0f;
+            p.crossfeed = 55.0f;
+            p.bass = 1.0f;
+            p.bright = 1.0f;
+            p.dialogue = 0.0f;
+            p.hrtf = 0.65f;
+            p.roomSize = 0.35f;
+            return p;
+
+        case 6: // Game
+            p.width = 120.0f;
+            p.center = 1.05f;
+            p.surround = 0.60f;
+            p.rear = 0.50f;
+            p.heightFront = 0.40f;
+            p.heightRear = 0.30f;
+            p.reverb = 15.0f;
+            p.crossfeed = 50.0f;
+            p.bass = 0.0f;
+            p.bright = 2.0f;
+            p.dialogue = 1.0f;
+            p.hrtf = 1.00f;
+            p.roomSize = 0.30f;
+            return p;
+
+        case 7: // Voice
+            p.width = 70.0f;
+            p.center = 1.60f;
+            p.surround = 0.10f;
+            p.rear = 0.05f;
+            p.heightFront = 0.05f;
+            p.heightRear = 0.02f;
+            p.reverb = 10.0f;
+            p.crossfeed = 40.0f;
+            p.bass = 0.0f;
+            p.bright = 0.0f;
+            p.dialogue = 5.0f;
+            p.hrtf = 0.35f;
+            p.roomSize = 0.20f;
+            return p;
+
+        case 8: // Night
+            p.width = 90.0f;
+            p.center = 1.20f;
+            p.surround = 0.25f;
+            p.rear = 0.15f;
+            p.heightFront = 0.15f;
+            p.heightRear = 0.08f;
+            p.reverb = 15.0f;
+            p.crossfeed = 60.0f;
+            p.bass = -2.0f;
+            p.bright = -1.0f;
+            p.dialogue = 3.0f;
+            p.hrtf = 0.55f;
+            p.roomSize = 0.30f;
+            return p;
+
+        case 9: // Bass+
+            p.width = 110.0f;
+            p.center = 1.05f;
+            p.surround = 0.35f;
+            p.rear = 0.25f;
+            p.heightFront = 0.25f;
+            p.heightRear = 0.15f;
+            p.reverb = 25.0f;
+            p.crossfeed = 60.0f;
+            p.bass = 5.0f;
+            p.bright = 0.0f;
+            p.dialogue = 1.0f;
+            p.hrtf = 0.70f;
+            p.roomSize = 0.45f;
+            return p;
+
+        case 10: // IEM Safe
+            p.width = 90.0f;
+            p.center = 1.10f;
+            p.surround = 0.35f;
+            p.rear = 0.20f;
+            p.heightFront = 0.30f;
+            p.heightRear = 0.18f;
+            p.reverb = 25.0f;
+            p.crossfeed = 80.0f;
+            p.bass = 1.0f;
+            p.bright = -2.0f;
+            p.dialogue = 2.0f;
+            p.ceiling = -2.0f;
+            p.hrtf = 0.65f;
+            p.roomSize = 0.40f;
+            return p;
+
+        case 11: // Aux Line
+            p.width = 105.0f;
+            p.center = 1.00f;
+            p.surround = 0.00f;
+            p.rear = 0.00f;
+            p.heightFront = 0.00f;
+            p.heightRear = 0.00f;
+            p.reverb = 8.0f;
+            p.crossfeed = 0.0f;
+            p.bass = 1.0f;
+            p.bright = 0.0f;
+            p.dialogue = 1.0f;
+            p.hrtf = 0.00f;
+            p.roomSize = 0.20f;
+            return p;
+
+        default:
+            p.width = 120.0f;
+            p.center = 1.10f;
+            p.surround = 0.50f;
+            p.rear = 0.35f;
+            p.heightFront = 0.45f;
+            p.heightRear = 0.25f;
+            p.reverb = 30.0f;
+            p.crossfeed = 60.0f;
+            p.bass = 2.0f;
+            p.bright = 1.0f;
+            p.dialogue = 2.0f;
+            p.hrtf = 0.85f;
+            p.roomSize = 0.50f;
+            return p;
+    }
+}
+
+//==============================================================================
+
+juce::AudioProcessorValueTreeState::ParameterLayout
+ImmersiveAUAudioProcessor::createParameterLayout()
+{
+    std::vector<std::unique_ptr<RangedAudioParameter>> params;
+
+    params.push_back(std::make_unique<AudioParameterChoice>(
+        "mode",
+        "Mode",
+        StringArray
+        {
+            "Off",
+            "Reference",
+            "Auto",
+            "Immersive",
+            "Movie",
+            "Music",
+            "Game",
+            "Voice",
+            "Night",
+            "Bass+",
+            "IEM Safe",
+            "Aux Line"
+        },
+        3
+    ));
+
+    params.push_back(std::make_unique<AudioParameterChoice>(
+        "output",
+        "Output Target",
+        StringArray
+        {
+            "Headphones",
+            "IEM",
+            "Line / Aux",
+            "Car"
+        },
+        0
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "intensity",
+        "Intensity",
+        NormalisableRange<float>(0.0f, 100.0f, 1.0f),
+        70.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "bass",
+        "Bass",
+        NormalisableRange<float>(-6.0f, 6.0f, 0.1f),
+        0.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "bright",
+        "Brightness",
+        NormalisableRange<float>(-6.0f, 6.0f, 0.1f),
+        0.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "dialogue",
+        "Dialogue",
+        NormalisableRange<float>(0.0f, 6.0f, 0.1f),
+        0.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "crossfeed",
+        "Crossfeed",
+        NormalisableRange<float>(0.0f, 100.0f, 1.0f),
+        60.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "outgain",
+        "Output Gain",
+        NormalisableRange<float>(-12.0f, 6.0f, 0.1f),
+        0.0f
+    ));
+
+    params.push_back(std::make_unique<AudioParameterFloat>(
+        "ceiling",
+        "Limiter Ceiling",
+        NormalisableRange<float>(-3.0f, -0.1f, 0.1f),
+        -1.0f
+    ));
+
+    return { params.begin(), params.end() };
+}
+
+//==============================================================================
+
+ImmersiveAUAudioProcessor::ImmersiveAUAudioProcessor()
+    : AudioProcessor(BusesProperties()
+                     .withInput("Input", AudioChannelSet::stereo(), true)
+                     .withOutput("Output", AudioChannelSet::stereo(), true)),
+      parameters(*this, nullptr, juce::Identifier("PARAMS"), createParameterLayout())
+{
+    dsp = std::make_unique<DSP>();
+
+    modeParam       = parameters.getRawParameterValue("mode");
+    outputParam     = parameters.getRawParameterValue("output");
+    intensityParam  = parameters.getRawParameterValue("intensity");
+    bassParam       = parameters.getRawParameterValue("bass");
+    brightParam     = parameters.getRawParameterValue("bright");
+    dialogueParam   = parameters.getRawParameterValue("dialogue");
+    crossfeedParam  = parameters.getRawParameterValue("crossfeed");
+    outputGainParam = parameters.getRawParameterValue("outgain");
+    ceilingParam    = parameters.getRawParameterValue("ceiling");
+}
+
+ImmersiveAUAudioProcessor::~ImmersiveAUAudioProcessor()
+{
+}
+
+//==============================================================================
+
+const juce::String ImmersiveAUAudioProcessor::getName() const
+{
+    return JucePlugin_Name;
+}
+
+bool ImmersiveAUAudioProcessor::acceptsMidi() const
+{
+    return false;
+}
+
+bool ImmersiveAUAudioProcessor::producesMidi() const
+{
+    return false;
+}
+
+bool ImmersiveAUAudioProcessor::isMidiEffect() const
+{
+    return false;
+}
+
+double ImmersiveAUAudioProcessor::getTailLengthSeconds() const
+{
+    return 2.0;
+}
+
+int ImmersiveAUAudioProcessor::getNumPrograms()
+{
+    return 1;
+}
+
+int ImmersiveAUAudioProcessor::getCurrentProgram()
+{
+    return 0;
+}
+
+void ImmersiveAUAudioProcessor::setCurrentProgram(int)
+{
+}
+
+const juce::String ImmersiveAUAudioProcessor::getProgramName(int)
+{
+    return {};
+}
+
+void ImmersiveAUAudioProcessor::changeProgramName(int, const juce::String&)
+{
+}
+
+//==============================================================================
+
+void ImmersiveAUAudioProcessor::prepareToPlay(double sampleRate, int)
+{
+    dsp->prepare(sampleRate);
+}
+
+void ImmersiveAUAudioProcessor::releaseResources()
+{
+    dsp->reset();
+}
+
+bool ImmersiveAUAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
+{
+    if (layouts.getMainInputChannelSet() != AudioChannelSet::stereo())
+        return false;
+
+    if (layouts.getMainOutputChannelSet() != AudioChannelSet::stereo())
+        return false;
+
+    return true;
+}
+
+//==============================================================================
+
+void ImmersiveAUAudioProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer&)
+{
+    ScopedNoDenormals noDenormals;
+
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
+
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear(i, 0, buffer.getNumSamples());
+
+    if (modeParam == nullptr
+        || outputParam == nullptr
+        || intensityParam == nullptr
+        || bassParam == nullptr
+        || brightParam == nullptr
+        || dialogueParam == nullptr
+        || crossfeedParam == nullptr
+        || outputGainParam == nullptr
+        || ceilingParam == nullptr)
+    {
+        return;
+    }
+
+    const int mode = (int) modeParam->load();
+
+    // True bypass.
+    if (mode == 0)
+        return;
+
+    if (buffer.getNumChannels() < 2)
+        return;
+
+    const int outputTarget = (int) outputParam->load();
+
+    PresetValues preset = getPreset(mode);
+
+    float intensity = intensityParam->load() / 70.0f;
+    intensity = jlimit(0.0f, 1.5f, intensity);
+
+    float width = 100.0f + (preset.width - 100.0f) * intensity;
+
+    float center = 1.0f + (preset.center - 1.0f) * intensity;
+
+    float surround = preset.surround * intensity;
+    float rear = preset.rear * intensity;
+
+    float heightFront = preset.heightFront * intensity;
+    float heightRear = preset.heightRear * intensity;
+
+    float reverb = preset.reverb * intensity;
+
+    float hrtf = preset.hrtf * jlimit(0.2f, 1.0f, 0.5f + 0.5f * intensity);
+
+    float bassDb = preset.bass + bassParam->load();
+    float brightDb = preset.bright + brightParam->load();
+    float dialogueDb = preset.dialogue + dialogueParam->load();
+
+    float crossfeedAmount = preset.crossfeed * (crossfeedParam->load() / 60.0f);
+    float ceilingDb = jmin(ceilingParam->load(), preset.ceiling);
+
+    // Output-target tuning.
+    if (outputTarget == 1) // IEM
+    {
+        crossfeedAmount = jmin(100.0f, crossfeedAmount + 15.0f);
+        brightDb -= 1.0f;
+        ceilingDb = jmin(ceilingDb, -2.0f);
+
+        hrtf *= 0.90f;
+        heightFront *= 0.90f;
+        heightRear *= 0.90f;
+    }
+    else if (outputTarget == 2) // Line / Aux
+    {
+        hrtf = 0.0f;
+
+        heightFront = 0.0f;
+        heightRear = 0.0f;
+
+        surround *= 0.20f;
+        rear = 0.0f;
+
+        crossfeedAmount = 0.0f;
+        reverb *= 0.50f;
+    }
+    else if (outputTarget == 3) // Car
+    {
+        hrtf = 0.0f;
+
+        heightFront = 0.0f;
+        heightRear = 0.0f;
+
+        surround = 0.0f;
+        rear = 0.0f;
+
+        reverb *= 0.30f;
+
+        dialogueDb += 1.0f;
+        bassDb += 1.0f;
+
+        crossfeedAmount = 0.0f;
+    }
+
+    width = jlimit(0.0f, 150.0f, width);
+
+    center = jlimit(0.5f, 2.5f, center);
+
+    surround = jlimit(0.0f, 1.5f, surround);
+    rear = jlimit(0.0f, 1.5f, rear);
+
+    heightFront = jlimit(0.0f, 1.5f, heightFront);
+    heightRear = jlimit(0.0f, 1.5f, heightRear);
+
+    reverb = jlimit(0.0f, 100.0f, reverb);
+    crossfeedAmount = jlimit(0.0f, 100.0f, crossfeedAmount);
+
+    RenderSettings settings;
+
+    settings.bypass = preset.bypass;
+
+    settings.widthLinear = jlimit(0.0f, 1.5f, width / 100.0f);
+
+    settings.centerGain = jlimit(0.5f, 2.5f, center + dialogueParam->load() * 0.04f);
+
+    settings.surroundGain = surround;
+    settings.rearGain = rear;
+
+    settings.heightFrontGain = heightFront;
+    settings.heightRearGain = heightRear;
+
+    settings.reverbMix = (reverb / 100.0f) * 0.35f;
+    settings.crossfeedGain = (crossfeedAmount / 100.0f) * 0.70f;
+
+    settings.bassDb = bassDb;
+    settings.brightDb = brightDb;
+    settings.dialogueDb = dialogueDb;
+
+    settings.outputGain = (float) Decibels::decibelsToGain(outputGainParam->load());
+    settings.ceilingDb = jlimit(-3.0f, -0.1f, ceilingDb);
+
+    settings.hrtfStrength = jlimit(0.0f, 1.0f, hrtf);
+    settings.roomSize = preset.roomSize;
+
+    dsp->update(settings);
+
+    float* l = buffer.getWritePointer(0);
+    float* r = buffer.getWritePointer(1);
+
+    for (int n = 0; n < buffer.getNumSamples(); ++n)
+        dsp->processSample(l[n], r[n]);
+}
+
+//==============================================================================
+
+bool ImmersiveAUAudioProcessor::hasEditor() const
+{
+    return true;
+}
+
+juce::AudioProcessorEditor* ImmersiveAUAudioProcessor::createEditor()
+{
+    return new juce::GenericAudioProcessorEditor(*this);
+}
+
+//==============================================================================
+
+void ImmersiveAUAudioProcessor::getStateInformation(MemoryBlock& destData)
+{
+    auto state = parameters.copyState();
+
+    std::unique_ptr<XmlElement> xml(state.createXml());
+
+    if (xml != nullptr)
+        copyXmlToBinary(*xml, destData);
+}
+
+void ImmersiveAUAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
+{
+    std::unique_ptr<XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
+
+    if (xml != nullptr)
+        parameters.replaceState(ValueTree::fromXml(*xml));
+}
+
+//==============================================================================
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new ImmersiveAUAudioProcessor();
+}
+```
+
+Save.
+
+---
+
+# 3. Clean rebuild
+
+Because the DSP core changed, do a clean build:
+
+```bash
+rm -rf build
+cmake -B build -G Xcode
+cmake --build build --config Release
+```
+
+Then reinstall:
+
+```bash
+rm -rf ~/Library/Audio/Plug-Ins/Components/ImmersiveAU.component
+cp -R build/ImmersiveAU_artefacts/Release/AU/ImmersiveAU.component ~/Library/Audio/Plug-Ins/Components/
+codesign --force --deep --sign - ~/Library/Audio/Plug-Ins/Components/ImmersiveAU.component
+```
+
+Restart SoundSource.
+
+---
+
+# 4. What changed sonically
+
+Compared to the first MVP, this should now feel:
+
+- more externalized
+- more stable center image
+- more height cueing
+- more surround envelopment
+- more “speaker-like” on headphones
+- better mode differentiation
+- better IEM safety/comfort behavior
+
+The important architectural improvement is that audio is now being treated as a **virtual bed**, not just widened stereo.
+
+---
+
+# 5. Current engine topology
+
+This version now does:
+
+```text
+Stereo In
+   │
+   ▼
+Mid/Side
+   │
+   ├─ Center extraction
+   ├─ Direct L/R
+   ├─ Decorrelated surrounds
+   ├─ Decorrelated rear
+   ├─ Front height bus
+   └─ Rear height bus
+   │
+   ▼
+11 virtual bed channels
+   │
+   ▼
+11 HRTF panners
+   ├─ ITD
+   ├─ ILD
+   ├─ pinna notch
+   └─ distance air
+   │
+   ▼
+Blend with dry bed
+   │
+   ▼
+FDN reverb
+   │
+   ▼
+Master EQ / crossfeed / limiter
+   │
+   ▼
+Stereo Out
+```
+
+---
+
+# 6. Recommended first settings
+
+Try:
+
+- Mode: **Movie**
+- Output Target: **Headphones**
+- Intensity: **70**
+- Bass: **0**
+- Brightness: **0**
+- Dialogue: **0**
+- Crossfeed: **60**
+- Limiter Ceiling: **-1.0**
+
+Then try:
+
+- Mode: **IEM Safe**
+- Output Target: **IEM**
+- Intensity: **55**
+- Crossfeed: **75**
+
+Then try:
+
+- Mode: **Aux Line**
+- Output Target: **Line / Aux**
+- Intensity: **40**
+
+---
+
+# 7. Next possible upgrade
+
+The next step would be:
+
+1. **True early reflections**
+2. **Bass management / virtual LFE**
+3. **Loudness normalization**
+4. **True-peak limiter**
+5. **Custom UI instead of generic editor**
+6. **Optional SOFA HRTF import**
+7. **Spectral accent objects**
+
+If you want the next drop after this, the best one is probably:
+
+```text
+Generate early reflections + bass management + loudness normalization
+```
+
+That will make it feel much closer to a premium commercial spatial audio product.
+
+### USER
+next
+
+### ASSISTANT
+Below is the **next upgrade drop**:  
+
+## Adds
+
+- **Early reflections**
+- **Bass management**
+- **Psychoacoustic harmonic bass**
+- **Approximate loudness normalization**
+- **IEM / Line / Car safety tuning updates**
+
+This makes the plugin feel much closer to a polished “premium spatial audio” product.
+
+---
+
+# 1. Create a new file
+
+Create:
+
+```bash
+cd ImmersiveAU
+nano Source/DspEnhancements.h
+```
+
+Paste this:
+
+```cpp
+#pragma once
+
+#include <JuceHeader.h>
+
+#include <cmath>
+#include <algorithm>
+
+using namespace juce;
+
+//==============================================================================
+// These modules assume Biquad and DelayLine are already defined
+// in SpatialEngine.h before this file is included.
+//==============================================================================
+
+//==============================================================================
+// Early reflections
+//==============================================================================
+
+struct EarlyReflections
+{
+    Biquad hp;
+    Biquad lp;
+
+    DelayLine taps[6];
+
+    float gainL[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float gainR[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    void reset()
+    {
+        hp.reset();
+        lp.reset();
+
+        for (int i = 0; i < 6; ++i)
+            taps[i].reset();
+    }
+
+    void prepare(double sr)
+    {
+        reset();
+
+        hp.setHighPass(sr, 250.0f);
+        lp.setLowPass(sr, 9000.0f);
+
+        static const int delayMs[6] =
+        {
+            5, 8, 12, 17, 24, 32
+        };
+
+        static const float gains[6] =
+        {
+            0.35f, 0.30f, 0.26f, 0.22f, 0.18f, 0.15f
+        };
+
+        static const float pans[6] =
+        {
+            -0.25f, 0.35f, -0.55f, 0.60f, -0.70f, 0.75f
+        };
+
+        int maxDelay = (int) (sr * 0.06) + 100;
+
+        for (int i = 0; i < 6; ++i)
+        {
+            taps[i].prepare(maxDelay);
+
+            int d = (int) (sr * (double) delayMs[i] / 1000.0);
+            taps[i].setDelaySamples(d);
+
+            float pan = pans[i];
+
+            gainL[i] = gains[i] * std::sqrt((1.0f - pan) * 0.5f);
+            gainR[i] = gains[i] * std::sqrt((1.0f + pan) * 0.5f);
+        }
+    }
+
+    void process(float input, float& outL, float& outR)
+    {
+        float x = lp.process(hp.process(input, 0), 0);
+
+        for (int i = 0; i < 6; ++i)
+        {
+            taps[i].push(x);
+
+            float y = taps[i].read();
+
+            outL += y * gainL[i];
+            outR += y * gainR[i];
+        }
+    }
+};
+
+//==============================================================================
+// Bass management + harmonic bass
+//==============================================================================
+
+struct BassManager
+{
+    Biquad lowLP1;
+    Biquad lowLP2;
+
+    Biquad highHP1L;
+    Biquad highHP2L;
+
+    Biquad highHP1R;
+    Biquad highHP2R;
+
+    Biquad harmHP;
+    Biquad harmLP;
+
+    float enhance = 0.0f;
+
+    void reset()
+    {
+        lowLP1.reset();
+        lowLP2.reset();
+
+        highHP1L.reset();
+        highHP2L.reset();
+
+        highHP1R.reset();
+        highHP2R.reset();
+
+        harmHP.reset();
+        harmLP.reset();
+    }
+
+    void prepare(double sr, float crossoverHz)
+    {
+        reset();
+        update(sr, crossoverHz, 0.0f);
+    }
+
+    void update(double sr, float crossoverHz, float enhanceAmount)
+    {
+        crossoverHz = jlimit(40.0f, 160.0f, crossoverHz);
+        enhance = jlimit(0.0f, 1.0f, enhanceAmount);
+
+        lowLP1.setLowPass(sr, crossoverHz);
+        lowLP2.setLowPass(sr, crossoverHz);
+
+        highHP1L.setHighPass(sr, crossoverHz);
+        highHP2L.setHighPass(sr, crossoverHz);
+
+        highHP1R.setHighPass(sr, crossoverHz);
+        highHP2R.setHighPass(sr, crossoverHz);
+
+        harmHP.setHighPass(sr, 70.0f);
+        harmLP.setLowPass(sr, 300.0f);
+    }
+
+    void process(float& l, float& r)
+    {
+        float m = 0.5f * (l + r);
+
+        float low = lowLP1.process(m, 0);
+        low = lowLP2.process(low, 0);
+
+        float lHigh = highHP1L.process(l, 0);
+        lHigh = highHP2L.process(lHigh, 0);
+
+        float rHigh = highHP1R.process(r, 0);
+        rHigh = highHP2R.process(rHigh, 0);
+
+        float drive = 2.0f + 3.0f * enhance;
+
+        float sat = std::tanh(low * drive);
+        float harm = sat - low;
+
+        harm = harmHP.process(harm, 0);
+        harm = harmLP.process(harm, 0);
+
+        float lfe = low + harm * (0.40f + 0.60f * enhance);
+
+        // Soft safety clip on the LFE path.
+        lfe = std::tanh(lfe * 1.15f) * 0.90f;
+
+        l = lHigh + lfe;
+        r = rHigh + lfe;
+    }
+};
+
+//==============================================================================
+// Approximate loudness normalizer.
+// This is not a certified EBU R128 meter, but it is good enough for
+// a consumer spatial audio product MVP.
+//==============================================================================
+
+struct LoudnessNormalizer
+{
+    Biquad kHP;
+    Biquad kShelf;
+
+    double sampleRate = 48000.0;
+
+    bool enabled = false;
+
+    float targetDb = -14.0f;
+
+    float smoothMs = 0.0f;
+    float gainDbSmooth = 0.0f;
+
+    float levelAttackCoeff = 0.1f;
+    float levelReleaseCoeff = 0.01f;
+
+    float gainAttackCoeff = 0.05f;
+    float gainReleaseCoeff = 0.005f;
+
+    float disabledCoeff = 0.001f;
+
+    void reset()
+    {
+        kHP.reset();
+        kShelf.reset();
+
+        smoothMs = 0.0f;
+        gainDbSmooth = 0.0f;
+    }
+
+    void prepare(double sr)
+    {
+        sampleRate = sr;
+
+        reset();
+
+        kHP.setHighPass(sr, 100.0f);
+        kShelf.setHighShelf(sr, 1500.0f, 4.0f);
+
+        levelAttackCoeff = (float) (1.0 - std::exp(-1.0 / (sampleRate * 0.08)));
+        levelReleaseCoeff = (float) (1.0 - std::exp(-1.0 / (sampleRate * 0.80)));
+
+        gainAttackCoeff = (float) (1.0 - std::exp(-1.0 / (sampleRate * 0.20)));
+        gainReleaseCoeff = (float) (1.0 - std::exp(-1.0 / (sampleRate * 1.50)));
+
+        disabledCoeff = (float) (1.0 - std::exp(-1.0 / (sampleRate * 0.10)));
+    }
+
+    void update(float targetLUFS, bool enable)
+    {
+        enabled = enable;
+
+        // Rough LUFS-to-RMS operating point.
+        targetDb = targetLUFS + 2.0f;
+    }
+
+    void process(float& l, float& r)
+    {
+        if (! enabled)
+        {
+            // Gracefully return to unity gain when disabled.
+            gainDbSmooth += disabledCoeff * (0.0f - gainDbSmooth);
+
+            float g = (float) Decibels::decibelsToGain(gainDbSmooth);
+
+            l *= g;
+            r *= g;
+
+            return;
+        }
+
+        float wl = kHP.process(l, 0);
+        float wr = kHP.process(r, 1);
+
+        wl = kShelf.process(wl, 0);
+        wr = kShelf.process(wr, 1);
+
+        float ms = 0.5f * (wl * wl + wr * wr);
+
+        float coeff = (ms > smoothMs) ? levelAttackCoeff : levelReleaseCoeff;
+
+        smoothMs += coeff * (ms - smoothMs);
+
+        float rmsDb = 10.0f * std::log10(smoothMs + 1e-9f);
+
+        float gainDb = 0.0f;
+
+        if (rmsDb > -60.0f)
+            gainDb = jlimit(-12.0f, 12.0f, targetDb - rmsDb);
+
+        float gCoeff = (gainDb < gainDbSmooth) ? gainAttackCoeff : gainReleaseCoeff;
+
+        gainDbSmooth += gCoeff * (gainDb - gainDbSmooth);
+
+        float gain = (float) Decibels::decibelsToGain(gainDbSmooth);
+
+        l *= gain;
+        r *= gain;
+    }
+};
+```
+
+Save.
+
+---
+
+# 2. Patch `Source/SpatialEngine.h`
+
+Now make a few edits to `Source/SpatialEngine.h`.
+
+---
+
+## 2.1 Include the new modules
+
+Find this section:
+
+```cpp
+//==============================================================================
+
+struct FractionalDelay
+```
+
+Immediately **before** it, add:
+
+```cpp
+#include "DspEnhancements.h"
+```
+
+So it looks like:
+
+```cpp
+#include "DspEnhancements.h"
+
+//==============================================================================
+
+struct FractionalDelay
+```
+
+---
+
+## 2.2 Extend `RenderSettings`
+
+Find:
+
+```cpp
+struct RenderSettings
+{
+```
+
+Add these fields before the closing `};`:
+
+```cpp
+    float earlyMix = 0.0f;
+
+    float bassManage = 0.0f;
+    float bassEnhance = 0.0f;
+    float crossoverHz = 80.0f;
+
+    float loudnessEnable = 0.0f;
+    float loudnessTarget = -16.0f;
+```
+
+The end of `RenderSettings` should now include:
+
+```cpp
+    float hrtfStrength = 0.0f;
+    float roomSize = 0.5f;
+
+    float earlyMix = 0.0f;
+
+    float bassManage = 0.0f;
+    float bassEnhance = 0.0f;
+    float crossoverHz = 80.0f;
+
+    float loudnessEnable = 0.0f;
+    float loudnessTarget = -16.0f;
+};
+```
+
+---
+
+## 2.3 Add new engine members
+
+Inside:
+
+```cpp
+struct SpatialEngine
+{
+```
+
+Find:
+
+```cpp
+    Limiter limiter;
+```
+
+Add after it:
+
+```cpp
+    EarlyReflections early;
+    BassManager bassManager;
+    LoudnessNormalizer loudness;
+```
+
+So you have:
+
+```cpp
+    FDNReverb reverb;
+    Limiter limiter;
+
+    EarlyReflections early;
+    BassManager bassManager;
+    LoudnessNormalizer loudness;
+```
+
+---
+
+## 2.4 Prepare the new modules
+
+Find:
+
+```cpp
+        limiter.prepare(sr);
+```
+
+Add after it:
+
+```cpp
+        early.prepare(sr);
+        bassManager.prepare(sr, 80.0f);
+        loudness.prepare(sr);
+```
+
+So it becomes:
+
+```cpp
+        reverb.prepare(sr);
+        limiter.prepare(sr);
+
+        early.prepare(sr);
+        bassManager.prepare(sr, 80.0f);
+        loudness.prepare(sr);
+```
+
+---
+
+## 2.5 Update the new modules
+
+Find:
+
+```cpp
+        limiter.setThresholdDb(settings.ceilingDb);
+```
+
+Add after it:
+
+```cpp
+        bassManager.update(sampleRate, settings.crossoverHz, settings.bassEnhance);
+        loudness.update(settings.loudnessTarget, settings.loudnessEnable > 0.5f);
+```
+
+So you get:
+
+```cpp
+        reverb.setParams(settings.reverbMix, settings.roomSize, sampleRate);
+        limiter.setThresholdDb(settings.ceilingDb);
+
+        bassManager.update(sampleRate, settings.crossoverHz, settings.bassEnhance);
+        loudness.update(settings.loudnessTarget, settings.loudnessEnable > 0.5f);
+```
+
+---
+
+## 2.6 Add early reflections into the process path
+
+Find this block:
+
+```cpp
+        float revIn = m * 0.55f
+                    + side * 0.30f
+                    + (hfL + hfR + hrL + hrR) * 0.10f;
+```
+
+Immediately **before** it, add:
+
+```cpp
+        float earlyIn = m * 0.55f
+                      + side * 0.30f
+                      + (hfL + hfR + hrL + hrR) * 0.10f;
+
+        float eL = 0.0f;
+        float eR = 0.0f;
+
+        early.process(earlyIn, eL, eR);
+
+        outL += eL * settings.earlyMix * 0.45f;
+        outR += eR * settings.earlyMix * 0.45f;
+```
+
+So it becomes:
+
+```cpp
+        float earlyIn = m * 0.55f
+                      + side * 0.30f
+                      + (hfL + hfR + hrL + hrR) * 0.10f;
+
+        float eL = 0.0f;
+        float eR = 0.0f;
+
+        early.process(earlyIn, eL, eR);
+
+        outL += eL * settings.earlyMix * 0.45f;
+        outR += eR * settings.earlyMix * 0.45f;
+
+        float revIn = m * 0.55f
+                    + side * 0.30f
+                    + (hfL + hfR + hrL + hrR) * 0.10f;
+```
+
+---
+
+## 2.7 Add bass management + loudness before limiter
+
+Find:
+
+```cpp
+        outL *= settings.outputGain;
+        outR *= settings.outputGain;
+
+        limiter.process(outL, outR);
+```
+
+Replace with:
+
+```cpp
+        if (settings.bassManage > 0.001f)
+        {
+            float manL = outL;
+            float manR = outR;
+
+            bassManager.process(manL, manR);
+
+            outL = outL * (1.0f - settings.bassManage) + manL * settings.bassManage;
+            outR = outR * (1.0f - settings.bassManage) + manR * settings.bassManage;
+        }
+
+        if (settings.loudnessEnable > 0.5f)
+            loudness.process(outL, outR);
+
+        outL *= settings.outputGain;
+        outR *= settings.outputGain;
+
+        limiter.process(outL, outR);
+```
+
+---
+
+# 3. Patch `Source/PluginProcessor.cpp`
+
+Now update the preset system so modes control the new features.
+
+---
+
+## 3.1 Replace `PresetValues` and `getPreset()`
+
+In `Source/PluginProcessor.cpp`, find:
+
+```cpp
+struct PresetValues
+```
+
+Replace everything from:
+
+```cpp
+struct PresetValues
+```
+
+through the end of:
+
+```cpp
+static PresetValues getPreset(int mode)
+{
+    ...
+}
+```
+
+with this:
+
+```cpp
+struct PresetValues
+{
+    bool bypass = false;
+
+    float width = 100.0f;
+    float center = 1.0f;
+
+    float surround = 0.0f;
+    float rear = 0.0f;
+
+    float heightFront = 0.0f;
+    float heightRear = 0.0f;
+
+    float reverb = 0.0f;
+    float crossfeed = 50.0f;
+
+    float bass = 0.0f;
+    float bright = 0.0f;
+    float dialogue = 0.0f;
+
+    float ceiling = -1.0f;
+
+    float hrtf = 0.0f;
+    float roomSize = 0.5f;
+
+    float early = 0.0f;
+
+    float bassManage = 0.0f;
+    float bassEnhance = 0.0f;
+    float crossover = 80.0f;
+
+    float loudnessEnable = 0.0f;
+    float loudnessTarget = -16.0f;
+};
+
+static PresetValues getPreset(int mode)
+{
+    PresetValues p;
+
+    switch (mode)
+    {
+        case 0: // Off
+            p.bypass = true;
+            p.hrtf = 0.0f;
+            p.loudnessEnable = 0.0f;
+            return p;
+
+        case 1: // Reference
+            p.width = 100.0f;
+            p.center = 1.0f;
+            p.surround = 0.0f;
+            p.rear = 0.0f;
+            p.heightFront = 0.0f;
+            p.heightRear = 0.0f;
+            p.reverb = 0.0f;
+            p.crossfeed = 0.0f;
+            p.hrtf = 0.0f;
+            p.roomSize = 0.2f;
+
+            p.early = 0.0f;
+            p.bassManage = 0.0f;
+            p.bassEnhance = 0.0f;
+            p.loudnessEnable = 0.0f;
+
+            return p;
+
+        case 2: // Auto
+            p.width = 115.0f;
+            p.center = 1.10f;
+            p.surround = 0.45f;
+            p.rear = 0.30f;
+            p.heightFront = 0.35f;
+            p.heightRear = 0.20f;
+            p.reverb = 25.0f;
+            p.crossfeed = 60.0f;
+            p.bass = 1.0f;
+            p.bright = 1.0f;
+            p.dialogue = 1.0f;
+            p.hrtf = 0.75f;
+            p.roomSize = 0.45f;
+
+            p.early = 0.18f;
+            p.bassManage = 0.70f;
+            p.bassEnhance = 0.20f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -16.0f;
+
+            return p;
+
+        case 3: // Immersive
+            p.width = 120.0f;
+            p.center = 1.10f;
+            p.surround = 0.50f;
+            p.rear = 0.35f;
+            p.heightFront = 0.45f;
+            p.heightRear = 0.25f;
+            p.reverb = 30.0f;
+            p.crossfeed = 60.0f;
+            p.bass = 2.0f;
+            p.bright = 1.0f;
+            p.dialogue = 2.0f;
+            p.hrtf = 0.85f;
+            p.roomSize = 0.50f;
+
+            p.early = 0.22f;
+            p.bassManage = 0.80f;
+            p.bassEnhance = 0.25f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -16.0f;
+
+            return p;
+
+        case 4: // Movie
+            p.width = 130.0f;
+            p.center = 1.30f;
+            p.surround = 0.60f;
+            p.rear = 0.45f;
+            p.heightFront = 0.55f;
+            p.heightRear = 0.35f;
+            p.reverb = 40.0f;
+            p.crossfeed = 65.0f;
+            p.bass = 3.0f;
+            p.bright = 0.0f;
+            p.dialogue = 4.0f;
+            p.hrtf = 0.90f;
+            p.roomSize = 0.65f;
+
+            p.early = 0.28f;
+            p.bassManage = 1.0f;
+            p.bassEnhance = 0.30f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -16.0f;
+
+            return p;
+
+        case 5: // Music
+            p.width = 110.0f;
+            p.center = 1.00f;
+            p.surround = 0.30f;
+            p.rear = 0.20f;
+            p.heightFront = 0.25f;
+            p.heightRear = 0.12f;
+            p.reverb = 20.0f;
+            p.crossfeed = 55.0f;
+            p.bass = 1.0f;
+            p.bright = 1.0f;
+            p.dialogue = 0.0f;
+            p.hrtf = 0.65f;
+            p.roomSize = 0.35f;
+
+            p.early = 0.15f;
+            p.bassManage = 0.60f;
+            p.bassEnhance = 0.15f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -14.0f;
+
+            return p;
+
+        case 6: // Game
+            p.width = 120.0f;
+            p.center = 1.05f;
+            p.surround = 0.60f;
+            p.rear = 0.50f;
+            p.heightFront = 0.40f;
+            p.heightRear = 0.30f;
+            p.reverb = 15.0f;
+            p.crossfeed = 50.0f;
+            p.bass = 0.0f;
+            p.bright = 2.0f;
+            p.dialogue = 1.0f;
+            p.hrtf = 1.00f;
+            p.roomSize = 0.30f;
+
+            p.early = 0.12f;
+            p.bassManage = 0.70f;
+            p.bassEnhance = 0.10f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -18.0f;
+
+            return p;
+
+        case 7: // Voice
+            p.width = 70.0f;
+            p.center = 1.60f;
+            p.surround = 0.10f;
+            p.rear = 0.05f;
+            p.heightFront = 0.05f;
+            p.heightRear = 0.02f;
+            p.reverb = 10.0f;
+            p.crossfeed = 40.0f;
+            p.bass = 0.0f;
+            p.bright = 0.0f;
+            p.dialogue = 5.0f;
+            p.hrtf = 0.35f;
+            p.roomSize = 0.20f;
+
+            p.early = 0.08f;
+            p.bassManage = 0.50f;
+            p.bassEnhance = 0.05f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -16.0f;
+
+            return p;
+
+        case 8: // Night
+            p.width = 90.0f;
+            p.center = 1.20f;
+            p.surround = 0.25f;
+            p.rear = 0.15f;
+            p.heightFront = 0.15f;
+            p.heightRear = 0.08f;
+            p.reverb = 15.0f;
+            p.crossfeed = 60.0f;
+            p.bass = -2.0f;
+            p.bright = -1.0f;
+            p.dialogue = 3.0f;
+            p.hrtf = 0.55f;
+            p.roomSize = 0.30f;
+
+            p.early = 0.12f;
+            p.bassManage = 0.80f;
+            p.bassEnhance = 0.10f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -20.0f;
+
+            return p;
+
+        case 9: // Bass+
+            p.width = 110.0f;
+            p.center = 1.05f;
+            p.surround = 0.35f;
+            p.rear = 0.25f;
+            p.heightFront = 0.25f;
+            p.heightRear = 0.15f;
+            p.reverb = 25.0f;
+            p.crossfeed = 60.0f;
+            p.bass = 5.0f;
+            p.bright = 0.0f;
+            p.dialogue = 1.0f;
+            p.hrtf = 0.70f;
+            p.roomSize = 0.45f;
+
+            p.early = 0.20f;
+            p.bassManage = 1.0f;
+            p.bassEnhance = 0.60f;
+            p.crossover = 90.0f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -16.0f;
+
+            return p;
+
+        case 10: // IEM Safe
+            p.width = 90.0f;
+            p.center = 1.10f;
+            p.surround = 0.35f;
+            p.rear = 0.20f;
+            p.heightFront = 0.30f;
+            p.heightRear = 0.18f;
+            p.reverb = 25.0f;
+            p.crossfeed = 80.0f;
+            p.bass = 1.0f;
+            p.bright = -2.0f;
+            p.dialogue = 2.0f;
+            p.ceiling = -2.0f;
+            p.hrtf = 0.65f;
+            p.roomSize = 0.40f;
+
+            p.early = 0.20f;
+            p.bassManage = 1.0f;
+            p.bassEnhance = 0.20f;
+            p.crossover = 100.0f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -18.0f;
+
+            return p;
+
+        case 11: // Aux Line
+            p.width = 105.0f;
+            p.center = 1.00f;
+            p.surround = 0.00f;
+            p.rear = 0.00f;
+            p.heightFront = 0.00f;
+            p.heightRear = 0.00f;
+            p.reverb = 8.0f;
+            p.crossfeed = 0.0f;
+            p.bass = 1.0f;
+            p.bright = 0.0f;
+            p.dialogue = 1.0f;
+            p.hrtf = 0.00f;
+            p.roomSize = 0.20f;
+
+            p.early = 0.05f;
+            p.bassManage = 0.70f;
+            p.bassEnhance = 0.15f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -16.0f;
+
+            return p;
+
+        default:
+            p.width = 120.0f;
+            p.center = 1.10f;
+            p.surround = 0.50f;
+            p.rear = 0.35f;
+            p.heightFront = 0.45f;
+            p.heightRear = 0.25f;
+            p.reverb = 30.0f;
+            p.crossfeed = 60.0f;
+            p.bass = 2.0f;
+            p.bright = 1.0f;
+            p.dialogue = 2.0f;
+            p.hrtf = 0.85f;
+            p.roomSize = 0.50f;
+
+            p.early = 0.22f;
+            p.bassManage = 0.80f;
+            p.bassEnhance = 0.25f;
+            p.loudnessEnable = 1.0f;
+            p.loudnessTarget = -16.0f;
+
+            return p;
+    }
+}
+```
+
+---
+
+## 3.2 Replace the settings calculation block
+
+In `processBlock`, find the block that starts with:
+
+```cpp
+    float intensity = intensityParam->load() / 70.0f;
+```
+
+and ends with:
+
+```cpp
+    settings.roomSize = preset.roomSize;
+```
+
+Replace that whole block with this:
+
+```cpp
+    float intensity = intensityParam->load() / 70.0f;
+    intensity = jlimit(0.0f, 1.5f, intensity);
+
+    float width = 100.0f + (preset.width - 100.0f) * intensity;
+
+    float center = 1.0f + (preset.center - 1.0f) * intensity;
+
+    float surround = preset.surround * intensity;
+    float rear = preset.rear * intensity;
+
+    float heightFront = preset.heightFront * intensity;
+    float heightRear = preset.heightRear * intensity;
+
+    float reverb = preset.reverb * intensity;
+
+    float hrtf = preset.hrtf * jlimit(0.2f, 1.0f, 0.5f + 0.5f * intensity);
+
+    float bassDb = preset.bass + bassParam->load();
+    float brightDb = preset.bright + brightParam->load();
+    float dialogueDb = preset.dialogue + dialogueParam->load();
+
+    float crossfeedAmount = preset.crossfeed * (crossfeedParam->load() / 60.0f);
+    float ceilingDb = jmin(ceilingParam->load(), preset.ceiling);
+
+    float earlyMix = preset.early * intensity;
+
+    float bassManage = preset.bassManage;
+    float bassEnhance = preset.bassEnhance * (0.5f + 0.5f * intensity);
+    float crossoverHz = preset.crossover;
+
+    float loudnessEnable = preset.loudnessEnable;
+    float loudnessTarget = preset.loudnessTarget;
+
+    // Output-target tuning.
+    if (outputTarget == 1) // IEM
+    {
+        crossfeedAmount = jmin(100.0f, crossfeedAmount + 15.0f);
+        brightDb -= 1.0f;
+        ceilingDb = jmin(ceilingDb, -2.0f);
+
+        hrtf *= 0.90f;
+        heightFront *= 0.90f;
+        heightRear *= 0.90f;
+
+        crossoverHz = jmax(crossoverHz, 100.0f);
+        bassEnhance *= 0.70f;
+
+        loudnessTarget = jmin(loudnessTarget, -18.0f);
+    }
+    else if (outputTarget == 2) // Line / Aux
+    {
+        hrtf = 0.0f;
+
+        heightFront = 0.0f;
+        heightRear = 0.0f;
+
+        surround *= 0.20f;
+        rear = 0.0f;
+
+        crossfeedAmount = 0.0f;
+        reverb *= 0.50f;
+
+        earlyMix *= 0.50f;
+        bassManage *= 0.70f;
+    }
+    else if (outputTarget == 3) // Car
+    {
+        hrtf = 0.0f;
+
+        heightFront = 0.0f;
+        heightRear = 0.0f;
+
+        surround = 0.0f;
+        rear = 0.0f;
+
+        reverb *= 0.30f;
+
+        dialogueDb += 1.0f;
+        bassDb += 1.0f;
+
+        crossfeedAmount = 0.0f;
+
+        earlyMix *= 0.40f;
+        bassEnhance += 0.10f;
+
+        loudnessEnable = 1.0f;
+        loudnessTarget = -14.0f;
+    }
+
+    width = jlimit(0.0f, 150.0f, width);
+
+    center = jlimit(0.5f, 2.5f, center);
+
+    surround = jlimit(0.0f, 1.5f, surround);
+    rear = jlimit(0.0f, 1.5f, rear);
+
+    heightFront = jlimit(0.0f, 1.5f, heightFront);
+    heightRear = jlimit(0.0f, 1.5f, heightRear);
+
+    reverb = jlimit(0.0f, 100.0f, reverb);
+    crossfeedAmount = jlimit(0.0f, 100.0f, crossfeedAmount);
+
+    earlyMix = jlimit(0.0f, 1.0f, earlyMix);
+
+    bassManage = jlimit(0.0f, 1.0f, bassManage);
+    bassEnhance = jlimit(0.0f, 1.0f, bassEnhance);
+    crossoverHz = jlimit(40.0f, 160.0f, crossoverHz);
+
+    loudnessEnable = jlimit(0.0f, 1.0f, loudnessEnable);
+    loudnessTarget = jlimit(-24.0f, -12.0f, loudnessTarget);
+
+    RenderSettings settings;
+
+    settings.bypass = preset.bypass;
+
+    settings.widthLinear = jlimit(0.0f, 1.5f, width / 100.0f);
+
+    settings.centerGain = jlimit(0.5f, 2.5f, center + dialogueParam->load() * 0.04f);
+
+    settings.surroundGain = surround;
+    settings.rearGain = rear;
+
+    settings.heightFrontGain = heightFront;
+    settings.heightRearGain = heightRear;
+
+    settings.reverbMix = (reverb / 100.0f) * 0.35f;
+    settings.crossfeedGain = (crossfeedAmount / 100.0f) * 0.70f;
+
+    settings.bassDb = bassDb;
+    settings.brightDb = brightDb;
+    settings.dialogueDb = dialogueDb;
+
+    settings.outputGain = (float) Decibels::decibelsToGain(outputGainParam->load());
+    settings.ceilingDb = jlimit(-3.0f, -0.1f, ceilingDb);
+
+    settings.hrtfStrength = jlimit(0.0f, 1.0f, hrtf);
+    settings.roomSize = preset.roomSize;
+
+    settings.earlyMix = earlyMix;
+
+    settings.bassManage = bassManage;
+    settings.bassEnhance = bassEnhance;
+    settings.crossoverHz = crossoverHz;
+
+    settings.loudnessEnable = loudnessEnable;
+    settings.loudnessTarget = loudnessTarget;
+```
+
+---
+
+# 4. Rebuild
+
+Do a clean rebuild:
+
+```bash
+rm -rf build
+cmake -B build -G Xcode
+cmake --build build --config Release
+```
+
+Install again:
+
+```bash
+rm -rf ~/Library/Audio/Plug-Ins/Components/ImmersiveAU.component
+cp -R build/ImmersiveAU_artefacts/Release/AU/ImmersiveAU.component ~/Library/Audio/Plug-Ins/Components/
+codesign --force --deep --sign - ~/Library/Audio/Plug-Ins/Components/ImmersiveAU.component
+```
+
+Restart SoundSource.
+
+---
+
+# 5. What you just added
+
+## Early reflections
+
+This gives:
+
+- better externalization
+- more natural room placement
+- less “inside the head” feeling
+- better height stability
+
+## Bass management
+
+This adds:
+
+- crossover
+- mono low-frequency management
+- safer bass for headphones/IEMs
+- optional harmonic bass enhancement
+
+This is important for:
+
+- IEMs
+- small headphone drivers
+- aux/car setups
+- preventing muddy low end
+
+## Loudness normalization
+
+This adds:
+
+- more consistent volume between modes
+- quieter safe listening for IEM Safe / Night
+- louder, more confident behavior for Music / Car
+- better perceived polish
+
+This is approximate, not a certified broadcast loudness meter, but it is enough for a strong MVP.
+
+---
+
+# 6. Recommended test settings
+
+## Cinematic premium
+
+- Mode: **Movie**
+- Output Target: **Headphones**
+- Intensity: **70**
+- Bass: **0**
+- Brightness: **0**
+- Dialogue: **0**
+- Crossfeed: **65**
+- Ceiling: **-1.0**
+
+## IEM comfort
+
+- Mode: **IEM Safe**
+- Output Target: **IEM**
+- Intensity: **55**
+- Bass: **0**
+- Brightness: **0**
+- Dialogue: **0**
+- Crossfeed: **75**
+- Ceiling: **-2.0**
+
+## Aux / line
+
+- Mode: **Aux Line**
+- Output Target: **Line / Aux**
+- Intensity: **40**
+- Bass: **0**
+- Brightness: **0**
+- Dialogue: **0**
+
+## Car
+
+- Mode: **Music**
+- Output Target: **Car**
+- Intensity: **50**
+- Bass: **+1**
+- Brightness: **0**
+- Dialogue: **+1**
+
+---
+
+# 7. Current full signal chain
+
+Your plugin now behaves like this:
+
+```text
+Stereo In
+   │
+   ▼
+Mid/Side + Center Extraction
+   │
+   ▼
+Virtual Bed Generation
+   ├─ L/R direct
+   ├─ Center
+   ├─ Surround
+   ├─ Rear
+   ├─ Front Height
+   └─ Rear Height
+   │
+   ▼
+11 HRTF Panners
+   ├─ ITD
+   ├─ ILD
+   ├─ Pinna cues
+   └─ Distance air
+   │
+   ▼
+Dry/Spatial Blend
+   │
+   ▼
+Early Reflections
+   │
+   ▼
+FDN Reverb
+   │
+   ▼
+Master EQ
+   │
+   ▼
+Crossfeed
+   │
+   ▼
+Bass Management
+   │
+   ▼
+Loudness Normalization
+   │
+   ▼
+Output Gain
+   │
+   ▼
+Limiter
+   │
+   ▼
+Stereo Out
+```
+
+This is now a much more serious spatial audio engine.
+
+---
+
+# 8. Next best upgrade
+
+The next best upgrade would be one of these:
+
+## Option A: Custom UI
+
+Replace the generic editor with a nice UI:
+
+- Mode selector
+- Output target selector
+- Intensity knob
+- Bass / Bright / Dialogue knobs
+- Crossfeed knob
+- Output gain
+- Limiter ceiling
+- Presets
+
+This is important if you want it to feel like a real product.
+
+## Option B: True object accents
+
+Add spectral accent objects:
+
+- 8 moving objects
+- band-based direction
+- height steering
+- transient object detection
+
+This makes it feel more “object-based”.
+
+## Option C: True-peak limiter + certified loudness
+
+Upgrade the safety/mastering chain:
+
+- true-peak detection
+- oversampled ISP estimation
+- proper LUFS short-term metering
+- per-mode loudness targets
+
+This is important for quality and safety.
+
+---
+
+If you want the next step, I recommend:
+
+```text
+Generate the custom UI
+```
+
+or
+
+```text
+Generate true object accents
+```
+
+For a product that people will actually use, **custom UI** is probably the next most valuable step.
