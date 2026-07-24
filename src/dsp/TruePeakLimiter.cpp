@@ -31,12 +31,16 @@ void TruePeakLimiter::setRelease(f32 ms) { releaseMs_ = ms; }
 void TruePeakLimiter::setMaxGainReduction(f32 db) { maxGainReductionDb_ = db; }
 
 f32 TruePeakLimiter::process(f32& inL, f32& inR) {
+    // Write input to delay buffer for lookahead
     delayBuffer_[delayWrite_] = inL;
-    f32 delayedL = delayBuffer_[delayRead_];
-    delayBuffer_[delayWrite_] = inR;
-    f32 delayedR = delayBuffer_[delayRead_];
+    delayBuffer_[(delayWrite_ + 1) % delaySize_] = inR;
+    
+    // Calculate read position with lookahead offset
+    i32 lookaheadReadPos = (delayWrite_ - delayRead_ + delaySize_) % delaySize_;
+    f32 delayedL = delayBuffer_[lookaheadReadPos];
+    f32 delayedR = delayBuffer_[(lookaheadReadPos + 1) % delaySize_];
+    
     delayWrite_ = (delayWrite_ + 1) % delaySize_;
-    delayRead_ = (delayRead_ + 1) % delaySize_;
 
     f32 peak = std::max(std::abs(delayedL), std::abs(delayedR));
     f32 maxGain = 1.0f;

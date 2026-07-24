@@ -88,6 +88,17 @@ private:
     f32 loudnessTarget_ = -16.0f;
     f32 limiterCeiling_ = -1.0f;
     bool lowLatency_ = false;
+    
+    // Pre-allocated buffers for processBed to avoid per-block allocations
+    std::vector<f32> cBuf_;
+    std::vector<f32> ldBuf_;
+    std::vector<f32> rdBuf_;
+    std::vector<f32> lsBuf_;
+    std::vector<f32> rsBuf_;
+    std::vector<f32> hfBuf_;
+    std::vector<f32> hrBuf_;
+    std::vector<f32> accL_;
+    std::vector<f32> accR_;
 
     void applyModeDefaults(SoundMode m);
     void processBed(const f32* inL, const f32* inR, f32* outL, f32* outR, i32 numFrames);

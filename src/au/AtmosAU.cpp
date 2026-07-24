@@ -590,7 +590,6 @@ OSStatus AtmosAU::GetProperty(AudioUnitPropertyID propID, AudioUnitScope scope, 
             if (scope == kAudioUnitScope_Global) {
                 UInt32* outDataSizePtr = static_cast<UInt32*>(outData);
                 if (outDataSizePtr) *outDataSizePtr = 4;
-                if (outWritable) *outWritable = false;
                 return noErr;
             }
             break;
